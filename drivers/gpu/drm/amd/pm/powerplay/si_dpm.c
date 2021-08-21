@@ -3440,6 +3440,11 @@ static void si_apply_state_adjust_rules(struct amdgpu_device *adev,
 		    (adev->pdev->device == 0x6605)) {
 			max_sclk = 75000;
 		}
+	} else if (adev->asic_type == CHIP_VERDE) {
+		if (adev->pdev->device == 0x682B) {
+			max_sclk = 78500;  /* Confirmed stable at 77500 vs 80000 when using radeon. What's going on here? */
+			max_mclk = 100050; /* Overclocking */
+		}
 	}
 
 	if (rps->vce_active) {
@@ -3505,7 +3510,8 @@ static void si_apply_state_adjust_rules(struct amdgpu_device *adev,
 				ps->performance_levels[i].mclk = max_mclk_vddc;
 		}
 		if (max_mclk) {
-			if (ps->performance_levels[i].mclk > max_mclk)
+			/* Trying to overclock memory to compensate for lower sclk */
+			if ((adev->pdev->device == 0x682B && ps->performance_levels[i].mclk == 100000) || ps->performance_levels[i].mclk > max_mclk)
 				ps->performance_levels[i].mclk = max_mclk;
 		}
 		if (max_sclk) {

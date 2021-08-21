@@ -2982,6 +2982,11 @@ static void si_apply_state_adjust_rules(struct radeon_device *rdev,
 
 		if (rdev->pm.dpm.high_pixelclock_count > 1)
 			disable_sclk_switching = true;
+	} else if (rdev->family == CHIP_VERDE) {
+		if (rdev->pdev->device == 0x682B) {
+			/* Confirmed stable at 75000 */
+			max_sclk = 80000;
+		}
 	}
 
 	if (rps->vce_active) {
