@@ -3442,8 +3442,8 @@ static void si_apply_state_adjust_rules(struct amdgpu_device *adev,
 		}
 	} else if (adev->asic_type == CHIP_VERDE) {
 		if (adev->pdev->device == 0x682B) {
-			max_sclk = 78500;  /* Confirmed stable at 77500 vs 80000 when using radeon. What's going on here? */
-			max_mclk = 100050; /* Overclocking */
+			max_sclk = 77500;  /* Confirmed stable at 77500 vs 80000 when using radeon. What's going on here? */
+			max_mclk = 115000; /* Confirmed stable at 110000 */
 		}
 	}
 
