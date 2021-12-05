@@ -3441,9 +3441,12 @@ static void si_apply_state_adjust_rules(struct amdgpu_device *adev,
 			max_sclk = 75000;
 		}
 	} else if (adev->asic_type == CHIP_VERDE) {
+		/* FirePro W5130M */
 		if (adev->pdev->device == 0x682B) {
-			max_sclk = 77500;  /* Confirmed stable at 77500 vs 80000 when using radeon. What's going on here? */
-			max_mclk = 115000; /* Confirmed stable at 110000 */
+			/* Confirmed stable at 77500 vs 80000 when using radeon. What's going on here? */
+			max_sclk = 77500;  
+			/* Confirmed stable overclock at 110000 */
+			/* max_mclk = 115000; */
 		}
 	}
 
@@ -3510,8 +3513,8 @@ static void si_apply_state_adjust_rules(struct amdgpu_device *adev,
 				ps->performance_levels[i].mclk = max_mclk_vddc;
 		}
 		if (max_mclk) {
-			/* Trying to overclock memory to compensate for lower sclk */
-			if ((adev->pdev->device == 0x682B && ps->performance_levels[i].mclk == 100000) || ps->performance_levels[i].mclk > max_mclk)
+			/* Uncomment condition to allow memory overclock on W5130M */
+			if (ps->performance_levels[i].mclk > max_mclk /* || (adev->pdev->device == 0x682B && ps->performance_levels[i].mclk == 100000) */)
 				ps->performance_levels[i].mclk = max_mclk;
 		}
 		if (max_sclk) {
