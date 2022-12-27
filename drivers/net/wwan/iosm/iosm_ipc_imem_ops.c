@@ -91,6 +91,14 @@ void ipc_imem_wwan_channel_init(struct iosm_imem *ipc_imem,
 	}
 
 	ipc_chnl_cfg_get(&chnl_cfg, ipc_imem->nr_of_channels);
+
+	if (ipc_imem->mmio->mux_protocol == MUX_AGGREGATION &&
+	    ipc_imem->nr_of_channels == IPC_MEM_IP_CHL_ID_0) {
+		chnl_cfg.ul_nr_of_entries = IPC_MEM_MAX_TDS_MUX_AGGR_UL;
+		chnl_cfg.dl_nr_of_entries = IPC_MEM_MAX_TDS_MUX_AGGR_DL;
+		chnl_cfg.dl_buf_size = IPC_MEM_MAX_ADB_BUF_SIZE;
+	}
+
 	ipc_imem_channel_init(ipc_imem, IPC_CTYPE_WWAN, chnl_cfg,
 			      IRQ_MOD_OFF);
 
@@ -176,11 +184,14 @@ channel_unavailable:
 	return false;
 }
 
-/* Release a sio link to CP. */
-void ipc_imem_sys_cdev_close(struct iosm_cdev *ipc_cdev)
+/**
+ * ipc_imem_sys_port_close - Release a sio link to CP.
+ * @ipc_imem:          Imem instance.
+ * @channel:           Channel instance.
+ */
+void ipc_imem_sys_port_close(struct iosm_imem *ipc_imem,
+			     struct ipc_mem_channel *channel)
 {
-	struct iosm_imem *ipc_imem = ipc_cdev->ipc_imem;
-	struct ipc_mem_channel *channel = ipc_cdev->channel;
 	enum ipc_phase curr_phase;
 	int status = 0;
 	u32 tail = 0;
@@ -587,7 +598,7 @@ int ipc_imem_sys_devlink_write(struct iosm_devlink *ipc_devlink,
 		goto out;
 	}
 
-	memcpy(skb_put(skb, count), buf, count);
+	skb_put_data(skb, buf, count);
 
 	IPC_CB(skb)->op_type = UL_USR_OP_BLOCKED;
 
@@ -638,6 +649,6 @@ int ipc_imem_sys_devlink_read(struct iosm_devlink *devlink, u8 *data,
 	memcpy(data, skb->data, skb->len);
 
 devlink_read_fail:
-	ipc_pcie_kfree_skb(devlink->pcie, skb);
+	dev_kfree_skb(skb);
 	return rc;
 }

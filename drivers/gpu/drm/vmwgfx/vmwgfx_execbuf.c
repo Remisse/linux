@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright 2009 - 2015 VMware, Inc., Palo Alto, CA., USA
+ * Copyright 2009 - 2022 VMware, Inc., Palo Alto, CA., USA
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -25,6 +25,7 @@
  *
  **************************************************************************/
 #include <linux/sync_file.h>
+#include <linux/hashtable.h>
 
 #include "vmwgfx_drv.h"
 #include "vmwgfx_reg.h"
@@ -34,7 +35,6 @@
 #include "vmwgfx_binding.h"
 #include "vmwgfx_mksstat.h"
 
-#define VMW_RES_HT_ORDER 12
 
 /*
  * Helper macro to get dx_ctx_node if available otherwise print an error
@@ -1047,7 +1047,7 @@ static int vmw_query_bo_switch_prepare(struct vmw_private *dev_priv,
 
 	if (unlikely(new_query_bo != sw_context->cur_query_bo)) {
 
-		if (unlikely(new_query_bo->base.resource->num_pages > 4)) {
+		if (unlikely(PFN_UP(new_query_bo->base.resource->size) > 4)) {
 			VMW_DEBUG_USER("Query buffer too large.\n");
 			return -EINVAL;
 		}
@@ -1171,14 +1171,13 @@ static int vmw_translate_mob_ptr(struct vmw_private *dev_priv,
 	int ret;
 
 	vmw_validation_preload_bo(sw_context->ctx);
-	vmw_bo = vmw_user_bo_noref_lookup(sw_context->fp->tfile, handle);
+	vmw_bo = vmw_user_bo_noref_lookup(sw_context->filp, handle);
 	if (IS_ERR(vmw_bo)) {
 		VMW_DEBUG_USER("Could not find or use MOB buffer.\n");
 		return PTR_ERR(vmw_bo);
 	}
-
 	ret = vmw_validation_add_bo(sw_context->ctx, vmw_bo, true, false);
-	vmw_user_bo_noref_release();
+	ttm_bo_put(&vmw_bo->base);
 	if (unlikely(ret != 0))
 		return ret;
 
@@ -1226,14 +1225,13 @@ static int vmw_translate_guest_ptr(struct vmw_private *dev_priv,
 	int ret;
 
 	vmw_validation_preload_bo(sw_context->ctx);
-	vmw_bo = vmw_user_bo_noref_lookup(sw_context->fp->tfile, handle);
+	vmw_bo = vmw_user_bo_noref_lookup(sw_context->filp, handle);
 	if (IS_ERR(vmw_bo)) {
 		VMW_DEBUG_USER("Could not find or use GMR region.\n");
 		return PTR_ERR(vmw_bo);
 	}
-
 	ret = vmw_validation_add_bo(sw_context->ctx, vmw_bo, false, false);
-	vmw_user_bo_noref_release();
+	ttm_bo_put(&vmw_bo->base);
 	if (unlikely(ret != 0))
 		return ret;
 
@@ -2166,6 +2164,44 @@ vmw_cmd_dx_set_single_constant_buffer(struct vmw_private *dev_priv,
 }
 
 /**
+ * vmw_cmd_dx_set_constant_buffer_offset - Validate
+ * SVGA_3D_CMD_DX_SET_VS/PS/GS/HS/DS/CS_CONSTANT_BUFFER_OFFSET command.
+ *
+ * @dev_priv: Pointer to a device private struct.
+ * @sw_context: The software context being used for this batch.
+ * @header: Pointer to the command header in the command stream.
+ */
+static int
+vmw_cmd_dx_set_constant_buffer_offset(struct vmw_private *dev_priv,
+				      struct vmw_sw_context *sw_context,
+				      SVGA3dCmdHeader *header)
+{
+	VMW_DECLARE_CMD_VAR(*cmd, SVGA3dCmdDXSetConstantBufferOffset);
+
+	struct vmw_ctx_validation_info *ctx_node = VMW_GET_CTX_NODE(sw_context);
+	u32 shader_slot;
+
+	if (!has_sm5_context(dev_priv))
+		return -EINVAL;
+
+	if (!ctx_node)
+		return -EINVAL;
+
+	cmd = container_of(header, typeof(*cmd), header);
+	if (cmd->body.slot >= SVGA3D_DX_MAX_CONSTBUFFERS) {
+		VMW_DEBUG_USER("Illegal const buffer slot %u.\n",
+			       (unsigned int) cmd->body.slot);
+		return -EINVAL;
+	}
+
+	shader_slot = cmd->header.id - SVGA_3D_CMD_DX_SET_VS_CONSTANT_BUFFER_OFFSET;
+	vmw_binding_cb_offset_update(ctx_node->staged, shader_slot,
+				     cmd->body.slot, cmd->body.offsetInBytes);
+
+	return 0;
+}
+
+/**
  * vmw_cmd_dx_set_shader_res - Validate SVGA_3D_CMD_DX_SET_SHADER_RESOURCES
  * command
  *
@@ -2918,7 +2954,7 @@ static int vmw_cmd_set_uav(struct vmw_private *dev_priv,
 	if (!has_sm5_context(dev_priv))
 		return -EINVAL;
 
-	if (num_uav > SVGA3D_MAX_UAVIEWS) {
+	if (num_uav > vmw_max_num_uavs(dev_priv)) {
 		VMW_DEBUG_USER("Invalid UAV binding.\n");
 		return -EINVAL;
 	}
@@ -2950,7 +2986,7 @@ static int vmw_cmd_set_cs_uav(struct vmw_private *dev_priv,
 	if (!has_sm5_context(dev_priv))
 		return -EINVAL;
 
-	if (num_uav > SVGA3D_MAX_UAVIEWS) {
+	if (num_uav > vmw_max_num_uavs(dev_priv)) {
 		VMW_DEBUG_USER("Invalid UAV binding.\n");
 		return -EINVAL;
 	}
@@ -3528,6 +3564,24 @@ static const struct vmw_cmd_entry vmw_cmd_entries[SVGA_3D_CMD_MAX] = {
 	VMW_CMD_DEF(SVGA_3D_CMD_DX_TRANSFER_FROM_BUFFER,
 		    &vmw_cmd_dx_transfer_from_buffer,
 		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_VS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_PS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_GS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_HS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_DS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_SET_CS_CONSTANT_BUFFER_OFFSET,
+		    &vmw_cmd_dx_set_constant_buffer_offset,
+		    true, false, true),
 	VMW_CMD_DEF(SVGA_3D_CMD_INTRA_SURFACE_COPY, &vmw_cmd_intra_surface_copy,
 		    true, false, true),
 
@@ -3561,6 +3615,8 @@ static const struct vmw_cmd_entry vmw_cmd_entries[SVGA_3D_CMD_MAX] = {
 		    &vmw_cmd_dx_define_streamoutput, true, false, true),
 	VMW_CMD_DEF(SVGA_3D_CMD_DX_BIND_STREAMOUTPUT,
 		    &vmw_cmd_dx_bind_streamoutput, true, false, true),
+	VMW_CMD_DEF(SVGA_3D_CMD_DX_DEFINE_RASTERIZER_STATE_V2,
+		    &vmw_cmd_dx_so_define, true, false, true),
 };
 
 bool vmw_cmd_describe(const void *buf, u32 *size, char const **cmd)
@@ -3813,7 +3869,6 @@ int vmw_execbuf_fence_commands(struct drm_file *file_priv,
  * @fence: Pointer to the fenc object.
  * @fence_handle: User-space fence handle.
  * @out_fence_fd: exported file descriptor for the fence.  -1 if not used
- * @sync_file:  Only used to clean up in case of an error in this function.
  *
  * This function copies fence information to user-space. If copying fails, the
  * user-space struct drm_vmw_fence_rep::error member is hopefully left
@@ -3823,17 +3878,17 @@ int vmw_execbuf_fence_commands(struct drm_file *file_priv,
  * Also if copying fails, user-space will be unable to signal the fence object
  * so we wait for it immediately, and then unreference the user-space reference.
  */
-void
+int
 vmw_execbuf_copy_fence_user(struct vmw_private *dev_priv,
 			    struct vmw_fpriv *vmw_fp, int ret,
 			    struct drm_vmw_fence_rep __user *user_fence_rep,
 			    struct vmw_fence_obj *fence, uint32_t fence_handle,
-			    int32_t out_fence_fd, struct sync_file *sync_file)
+			    int32_t out_fence_fd)
 {
 	struct drm_vmw_fence_rep fence_rep;
 
 	if (user_fence_rep == NULL)
-		return;
+		return 0;
 
 	memset(&fence_rep, 0, sizeof(fence_rep));
 
@@ -3861,20 +3916,13 @@ vmw_execbuf_copy_fence_user(struct vmw_private *dev_priv,
 	 * handle.
 	 */
 	if (unlikely(ret != 0) && (fence_rep.error == 0)) {
-		if (sync_file)
-			fput(sync_file->file);
-
-		if (fence_rep.fd != -1) {
-			put_unused_fd(fence_rep.fd);
-			fence_rep.fd = -1;
-		}
-
-		ttm_ref_object_base_unref(vmw_fp->tfile, fence_handle,
-					  TTM_REF_USAGE);
+		ttm_ref_object_base_unref(vmw_fp->tfile, fence_handle);
 		VMW_DEBUG_USER("Fence copy error. Syncing.\n");
 		(void) vmw_fence_obj_wait(fence, false, false,
 					  VMW_FENCE_WAIT_TIMEOUT);
 	}
+
+	return ret ? -EFAULT : 0;
 }
 
 /**
@@ -4052,9 +4100,7 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 	int ret;
 	int32_t out_fence_fd = -1;
 	struct sync_file *sync_file = NULL;
-	DECLARE_VAL_CONTEXT(val_ctx, &sw_context->res_ht, 1);
-
-	vmw_validation_set_val_mem(&val_ctx, &dev_priv->vvm);
+	DECLARE_VAL_CONTEXT(val_ctx, sw_context, 1);
 
 	if (flags & DRM_VMW_EXECBUF_FLAG_EXPORT_FENCE_FD) {
 		out_fence_fd = get_unused_fd_flags(O_CLOEXEC);
@@ -4101,6 +4147,7 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 		sw_context->kernel = true;
 	}
 
+	sw_context->filp = file_priv;
 	sw_context->fp = vmw_fpriv(file_priv);
 	INIT_LIST_HEAD(&sw_context->ctx_list);
 	sw_context->cur_query_bo = dev_priv->pinned_bo;
@@ -4115,14 +4162,6 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 
 	if (sw_context->staged_bindings)
 		vmw_binding_state_reset(sw_context->staged_bindings);
-
-	if (!sw_context->res_ht_initialized) {
-		ret = drm_ht_create(&sw_context->res_ht, VMW_RES_HT_ORDER);
-		if (unlikely(ret != 0))
-			goto out_unlock;
-
-		sw_context->res_ht_initialized = true;
-	}
 
 	INIT_LIST_HEAD(&sw_context->staged_cmd_res);
 	sw_context->ctx = &val_ctx;
@@ -4212,15 +4251,22 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 
 			(void) vmw_fence_obj_wait(fence, false, false,
 						  VMW_FENCE_WAIT_TIMEOUT);
+		}
+	}
+
+	ret = vmw_execbuf_copy_fence_user(dev_priv, vmw_fpriv(file_priv), ret,
+				    user_fence_rep, fence, handle, out_fence_fd);
+
+	if (sync_file) {
+		if (ret) {
+			/* usercopy of fence failed, put the file object */
+			fput(sync_file->file);
+			put_unused_fd(out_fence_fd);
 		} else {
 			/* Link the fence with the FD created earlier */
 			fd_install(out_fence_fd, sync_file->file);
 		}
 	}
-
-	vmw_execbuf_copy_fence_user(dev_priv, vmw_fpriv(file_priv), ret,
-				    user_fence_rep, fence, handle, out_fence_fd,
-				    sync_file);
 
 	/* Don't unreference when handing fence out */
 	if (unlikely(out_fence != NULL)) {
@@ -4239,7 +4285,7 @@ int vmw_execbuf_process(struct drm_file *file_priv,
 	 */
 	vmw_validation_unref_lists(&val_ctx);
 
-	return 0;
+	return ret;
 
 out_unlock_binding:
 	mutex_unlock(&dev_priv->binding_mutex);
@@ -4446,7 +4492,7 @@ int vmw_execbuf_ioctl(struct drm_device *dev, void *data,
 			goto mksstats_out;
 		}
 
-		ret = vmw_wait_dma_fence(dev_priv->fman, in_fence);
+		ret = dma_fence_wait(in_fence, true);
 		if (ret)
 			goto out;
 	}

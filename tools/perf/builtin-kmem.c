@@ -35,6 +35,7 @@
 #include <regex.h>
 
 #include <linux/ctype.h>
+#include <traceevent/event-parse.h>
 
 static int	kmem_slab;
 static int	kmem_page;
@@ -192,7 +193,7 @@ static int evsel__process_alloc_node_event(struct evsel *evsel, struct perf_samp
 	int ret = evsel__process_alloc_event(evsel, sample);
 
 	if (!ret) {
-		int node1 = cpu__get_node(sample->cpu),
+		int node1 = cpu__get_node((struct perf_cpu){.cpu = sample->cpu}),
 		    node2 = evsel__intval(evsel, sample, "node");
 
 		if (node1 != node2)
@@ -1946,7 +1947,7 @@ int cmd_kmem(int argc, const char **argv)
 			kmem_page = 1;
 	}
 
-	if (!strncmp(argv[0], "rec", 3)) {
+	if (strlen(argv[0]) > 2 && strstarts("record", argv[0])) {
 		symbol__init(NULL);
 		return __cmd_record(argc, argv);
 	}
