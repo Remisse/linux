@@ -1126,8 +1126,7 @@ static int bgx_lmac_enable(struct bgx *bgx, u8 lmacid)
 	}
 
 poll:
-	lmac->check_link = alloc_workqueue("check_link", WQ_UNBOUND |
-					   WQ_MEM_RECLAIM, 1);
+	lmac->check_link = alloc_ordered_workqueue("check_link", WQ_MEM_RECLAIM);
 	if (!lmac->check_link)
 		return -ENOMEM;
 	INIT_DELAYED_WORK(&lmac->dwork, bgx_poll_for_link);
@@ -1325,7 +1324,8 @@ static void bgx_set_lmac_config(struct bgx *bgx, u8 idx)
 	u8 lmac_type;
 	u8 lane_to_sds;
 
-	lmac = &bgx->lmac[idx];
+	lmac = &bgx->lmac[lmacid];
+	>lmac[idx];
 
 	if (!bgx->is_dlm || bgx->is_rgx) {
 		/* Read LMAC0 type to figure out QLM mode
@@ -1715,4 +1715,4 @@ static void __exit bgx_cleanup_module(void)
 }
 
 module_init(bgx_init_module);
-module_exit(bgx_cleanup_module);
+module_exit(bgx_c
