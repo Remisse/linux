@@ -3,9 +3,11 @@
 
 import argparse
 import json
+import pathlib
 import pprint
-import time
+import sys
 
+sys.path.append(pathlib.Path(__file__).resolve().parent.as_posix())
 from lib import YnlFamily, Netlink, NlError
 
 
@@ -19,14 +21,34 @@ class YnlEncoder(json.JSONEncoder):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='YNL CLI sample')
+    description = """
+    YNL CLI utility - a general purpose netlink utility that uses YAML
+    specs to drive protocol encoding and decoding.
+    """
+    epilog = """
+    The --multi option can be repeated to include several do operations
+    in the same netlink payload.
+    """
+
+    parser = argparse.ArgumentParser(description=description,
+                                     epilog=epilog)
     parser.add_argument('--spec', dest='spec', type=str, required=True)
     parser.add_argument('--schema', dest='schema', type=str)
     parser.add_argument('--no-schema', action='store_true')
     parser.add_argument('--json', dest='json_text', type=str)
-    parser.add_argument('--do', dest='do', type=str)
-    parser.add_argument('--dump', dest='dump', type=str)
-    parser.add_argument('--sleep', dest='sleep', type=int)
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--do', dest='do', metavar='DO-OPERATION', type=str)
+    group.add_argument('--multi', dest='multi', nargs=2, action='append',
+                       metavar=('DO-OPERATION', 'JSON_TEXT'), type=str)
+    group.add_argument('--dump', dest='dump', metavar='DUMP-OPERATION', type=str)
+    group.add_argument('--list-ops', action='store_true')
+    group.add_argument('--list-msgs', action='store_true')
+
+    parser.add_argument('--duration', dest='duration', type=int,
+                        help='when subscribed, watch for DURATION seconds')
+    parser.add_argument('--sleep', dest='duration', type=int,
+                        help='alias for duration')
     parser.add_argument('--subscribe', dest='ntf', type=str)
     parser.add_argument('--replace', dest='flags', action='append_const',
                         const=Netlink.NLM_F_REPLACE)
@@ -63,8 +85,12 @@ def main():
     if args.ntf:
         ynl.ntf_subscribe(args.ntf)
 
-    if args.sleep:
-        time.sleep(args.sleep)
+    if args.list_ops:
+        for op_name, op in ynl.ops.items():
+            print(op_name, " [", ", ".join(op.modes), "]")
+    if args.list_msgs:
+        for op_name, op in ynl.msgs.items():
+            print(op_name, " [", ", ".join(op.modes), "]")
 
     try:
         if args.do:
@@ -73,13 +99,20 @@ def main():
         if args.dump:
             reply = ynl.dump(args.dump, attrs)
             output(reply)
+        if args.multi:
+            ops = [ (item[0], json.loads(item[1]), args.flags or []) for item in args.multi ]
+            reply = ynl.do_multi(ops)
+            output(reply)
     except NlError as e:
         print(e)
         exit(1)
 
     if args.ntf:
-        ynl.check_ntf()
-        output(ynl.async_msg_queue)
+        try:
+            for msg in ynl.poll_ntf(duration=args.duration):
+                output(msg)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":

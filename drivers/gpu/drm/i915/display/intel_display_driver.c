@@ -11,6 +11,7 @@
 #include <acpi/video.h>
 #include <drm/display/drm_dp_mst_helper.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_client_event.h>
 #include <drm/drm_mode_config.h>
 #include <drm/drm_privacy_screen_consumer.h>
 #include <drm/drm_probe_helper.h>
@@ -81,16 +82,17 @@ bool intel_display_driver_probe_defer(struct pci_dev *pdev)
 
 void intel_display_driver_init_hw(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
 	struct intel_cdclk_state *cdclk_state;
 
 	if (!HAS_DISPLAY(i915))
 		return;
 
-	cdclk_state = to_intel_cdclk_state(i915->display.cdclk.obj.state);
+	cdclk_state = to_intel_cdclk_state(display->cdclk.obj.state);
 
-	intel_update_cdclk(i915);
-	intel_cdclk_dump_config(i915, &i915->display.cdclk.hw, "Current CDCLK");
-	cdclk_state->logical = cdclk_state->actual = i915->display.cdclk.hw;
+	intel_update_cdclk(display);
+	intel_cdclk_dump_config(display, &display->cdclk.hw, "Current CDCLK");
+	cdclk_state->logical = cdclk_state->actual = display->cdclk.hw;
 
 	intel_display_wa_apply(i915);
 }
@@ -98,7 +100,6 @@ void intel_display_driver_init_hw(struct drm_i915_private *i915)
 static const struct drm_mode_config_funcs intel_mode_funcs = {
 	.fb_create = intel_user_framebuffer_create,
 	.get_format_info = intel_fb_get_format_info,
-	.output_poll_changed = intel_fbdev_output_poll_changed,
 	.mode_valid = intel_mode_valid,
 	.atomic_check = intel_atomic_check,
 	.atomic_commit = intel_atomic_commit,
@@ -168,10 +169,11 @@ static void intel_mode_config_cleanup(struct drm_i915_private *i915)
 
 static void intel_plane_possible_crtcs_init(struct drm_i915_private *dev_priv)
 {
+	struct intel_display *display = &dev_priv->display;
 	struct intel_plane *plane;
 
 	for_each_intel_plane(&dev_priv->drm, plane) {
-		struct intel_crtc *crtc = intel_crtc_for_pipe(dev_priv,
+		struct intel_crtc *crtc = intel_crtc_for_pipe(display,
 							      plane->pipe);
 
 		plane->base.possible_crtcs = drm_crtc_mask(&crtc->base);
@@ -192,17 +194,19 @@ void intel_display_driver_early_probe(struct drm_i915_private *i915)
 
 	intel_display_irq_init(i915);
 	intel_dkl_phy_init(i915);
-	intel_color_init_hooks(i915);
-	intel_init_cdclk_hooks(i915);
+	intel_color_init_hooks(&i915->display);
+	intel_init_cdclk_hooks(&i915->display);
 	intel_audio_hooks_init(i915);
 	intel_dpll_init_clock_hook(i915);
 	intel_init_display_hooks(i915);
 	intel_fdi_init_hook(i915);
+	intel_dmc_wl_init(&i915->display);
 }
 
 /* part #1: call before irq install */
 int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
 	int ret;
 
 	if (i915_inject_probe_failure(i915))
@@ -215,9 +219,9 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
 			return ret;
 	}
 
-	intel_bios_init(i915);
+	intel_bios_init(display);
 
-	ret = intel_vga_register(i915);
+	ret = intel_vga_register(display);
 	if (ret)
 		goto cleanup_bios;
 
@@ -233,7 +237,7 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
 	if (!HAS_DISPLAY(i915))
 		return 0;
 
-	intel_dmc_init(i915);
+	intel_dmc_init(display);
 
 	i915->display.wq.modeset = alloc_ordered_workqueue("i915_modeset", 0);
 	i915->display.wq.flip = alloc_workqueue("i915_flip", WQ_HIGHPRI |
@@ -241,11 +245,11 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
 
 	intel_mode_config_init(i915);
 
-	ret = intel_cdclk_init(i915);
+	ret = intel_cdclk_init(display);
 	if (ret)
 		goto cleanup_vga_client_pw_domain_dmc;
 
-	ret = intel_color_init(i915);
+	ret = intel_color_init(display);
 	if (ret)
 		goto cleanup_vga_client_pw_domain_dmc;
 
@@ -261,19 +265,19 @@ int intel_display_driver_probe_noirq(struct drm_i915_private *i915)
 	if (ret)
 		goto cleanup_vga_client_pw_domain_dmc;
 
-	intel_init_quirks(i915);
+	intel_init_quirks(display);
 
-	intel_fbc_init(i915);
+	intel_fbc_init(display);
 
 	return 0;
 
 cleanup_vga_client_pw_domain_dmc:
-	intel_dmc_fini(i915);
+	intel_dmc_fini(display);
 	intel_power_domains_driver_remove(i915);
 cleanup_vga:
-	intel_vga_unregister(i915);
+	intel_vga_unregister(display);
 cleanup_bios:
-	intel_bios_driver_remove(i915);
+	intel_bios_driver_remove(display);
 
 	return ret;
 }
@@ -414,7 +418,8 @@ bool intel_display_driver_check_access(struct drm_i915_private *i915)
 /* part #2: call after irq install, but before gem init */
 int intel_display_driver_probe_nogem(struct drm_i915_private *i915)
 {
-	struct drm_device *dev = &i915->drm;
+	struct intel_display *display = &i915->display;
+	struct drm_device *dev = display->drm;
 	enum pipe pipe;
 	int ret;
 
@@ -425,9 +430,9 @@ int intel_display_driver_probe_nogem(struct drm_i915_private *i915)
 
 	intel_panel_sanitize_ssc(i915);
 
-	intel_pps_setup(i915);
+	intel_pps_setup(display);
 
-	intel_gmbus_setup(i915);
+	intel_gmbus_setup(display);
 
 	drm_dbg_kms(&i915->drm, "%d display pipe%s available.\n",
 		    INTEL_NUM_PIPES(i915),
@@ -447,16 +452,16 @@ int intel_display_driver_probe_nogem(struct drm_i915_private *i915)
 	intel_display_driver_init_hw(i915);
 	intel_dpll_update_ref_clks(i915);
 
-	if (i915->display.cdclk.max_cdclk_freq == 0)
-		intel_update_max_cdclk(i915);
+	if (display->cdclk.max_cdclk_freq == 0)
+		intel_update_max_cdclk(display);
 
-	intel_hti_init(i915);
+	intel_hti_init(display);
 
 	/* Just disable it once at startup */
-	intel_vga_disable(i915);
+	intel_vga_disable(display);
 	intel_setup_outputs(i915);
 
-	ret = intel_dp_tunnel_mgr_init(i915);
+	ret = intel_dp_tunnel_mgr_init(display);
 	if (ret)
 		goto err_hdcp;
 
@@ -464,7 +469,7 @@ int intel_display_driver_probe_nogem(struct drm_i915_private *i915)
 
 	drm_modeset_lock_all(dev);
 	intel_modeset_setup_hw_state(i915, dev->mode_config.acquire_ctx);
-	intel_acpi_assign_connector_fwnodes(i915);
+	intel_acpi_assign_connector_fwnodes(display);
 	drm_modeset_unlock_all(dev);
 
 	intel_initial_plane_config(i915);
@@ -480,7 +485,7 @@ int intel_display_driver_probe_nogem(struct drm_i915_private *i915)
 	return 0;
 
 err_hdcp:
-	intel_hdcp_component_fini(i915);
+	intel_hdcp_component_fini(display);
 err_mode_config:
 	intel_mode_config_cleanup(i915);
 
@@ -490,6 +495,7 @@ err_mode_config:
 /* part #3: call after gem init */
 int intel_display_driver_probe(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
 	int ret;
 
 	if (!HAS_DISPLAY(i915))
@@ -500,7 +506,7 @@ int intel_display_driver_probe(struct drm_i915_private *i915)
 	 * the BIOS fb takeover and whatever else magic ggtt reservations
 	 * happen during gem/ggtt init.
 	 */
-	intel_hdcp_component_init(i915);
+	intel_hdcp_component_init(display);
 
 	/*
 	 * Force all active planes to recompute their states. So that on
@@ -514,10 +520,6 @@ int intel_display_driver_probe(struct drm_i915_private *i915)
 
 	intel_overlay_setup(i915);
 
-	ret = intel_fbdev_init(&i915->drm);
-	if (ret)
-		return ret;
-
 	/* Only enable hotplug handling once the fbdev is fully set up. */
 	intel_hpd_init(i915);
 
@@ -528,6 +530,7 @@ int intel_display_driver_probe(struct drm_i915_private *i915)
 
 void intel_display_driver_register(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
 	struct drm_printer p = drm_dbg_printer(&i915->drm, DRM_UT_KMS,
 					       "i915 display info:");
 
@@ -535,24 +538,16 @@ void intel_display_driver_register(struct drm_i915_private *i915)
 		return;
 
 	/* Must be done after probing outputs */
-	intel_opregion_register(i915);
-	intel_acpi_video_register(i915);
+	intel_opregion_register(display);
+	intel_acpi_video_register(display);
 
 	intel_audio_init(i915);
 
 	intel_display_driver_enable_user_access(i915);
 
-	intel_display_debugfs_register(i915);
+	intel_audio_register(i915);
 
-	/*
-	 * Some ports require correctly set-up hpd registers for
-	 * detection to work properly (leading to ghost connected
-	 * connector status), e.g. VGA on gm45.  Hence we can only set
-	 * up the initial fbdev config after hpd irqs are fully
-	 * enabled. We do it last so that the async config cannot run
-	 * before the connectors are registered.
-	 */
-	intel_fbdev_initial_config_async(i915);
+	intel_display_debugfs_register(i915);
 
 	/*
 	 * We need to coordinate the hotplugs with the asynchronous
@@ -561,6 +556,8 @@ void intel_display_driver_register(struct drm_i915_private *i915)
 	 */
 	drm_kms_helper_poll_init(&i915->drm);
 	intel_hpd_poll_disable(i915);
+
+	intel_fbdev_setup(i915);
 
 	intel_display_device_info_print(DISPLAY_INFO(i915),
 					DISPLAY_RUNTIME_INFO(i915), &p);
@@ -586,6 +583,8 @@ void intel_display_driver_remove(struct drm_i915_private *i915)
 /* part #2: call after irq uninstall */
 void intel_display_driver_remove_noirq(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
+
 	if (!HAS_DISPLAY(i915))
 		return;
 
@@ -597,48 +596,50 @@ void intel_display_driver_remove_noirq(struct drm_i915_private *i915)
 	 */
 	intel_hpd_poll_fini(i915);
 
-	/* poll work can call into fbdev, hence clean that up afterwards */
-	intel_fbdev_fini(i915);
-
 	intel_unregister_dsm_handler();
 
 	/* flush any delayed tasks or pending work */
 	flush_workqueue(i915->unordered_wq);
 
-	intel_hdcp_component_fini(i915);
+	intel_hdcp_component_fini(display);
 
 	intel_mode_config_cleanup(i915);
 
-	intel_dp_tunnel_mgr_cleanup(i915);
+	intel_dp_tunnel_mgr_cleanup(display);
 
 	intel_overlay_cleanup(i915);
 
-	intel_gmbus_teardown(i915);
+	intel_gmbus_teardown(display);
 
 	destroy_workqueue(i915->display.wq.flip);
 	destroy_workqueue(i915->display.wq.modeset);
 
-	intel_fbc_cleanup(i915);
+	intel_fbc_cleanup(&i915->display);
 }
 
 /* part #3: call after gem init */
 void intel_display_driver_remove_nogem(struct drm_i915_private *i915)
 {
-	intel_dmc_fini(i915);
+	struct intel_display *display = &i915->display;
+
+	intel_dmc_fini(display);
 
 	intel_power_domains_driver_remove(i915);
 
-	intel_vga_unregister(i915);
+	intel_vga_unregister(display);
 
-	intel_bios_driver_remove(i915);
+	intel_bios_driver_remove(display);
 }
 
 void intel_display_driver_unregister(struct drm_i915_private *i915)
 {
+	struct intel_display *display = &i915->display;
+
 	if (!HAS_DISPLAY(i915))
 		return;
 
-	intel_fbdev_unregister(i915);
+	drm_client_dev_unregister(&i915->drm);
+
 	/*
 	 * After flushing the fbdev (incl. a late async config which
 	 * will have delayed queuing of a hotplug event), then flush
@@ -653,7 +654,7 @@ void intel_display_driver_unregister(struct drm_i915_private *i915)
 	drm_atomic_helper_shutdown(&i915->drm);
 
 	acpi_video_unregister();
-	intel_opregion_unregister(i915);
+	intel_opregion_unregister(display);
 }
 
 /*
@@ -683,12 +684,13 @@ __intel_display_driver_resume(struct drm_i915_private *i915,
 			      struct drm_atomic_state *state,
 			      struct drm_modeset_acquire_ctx *ctx)
 {
+	struct intel_display *display = &i915->display;
 	struct drm_crtc_state *crtc_state;
 	struct drm_crtc *crtc;
 	int ret, i;
 
 	intel_modeset_setup_hw_state(i915, ctx);
-	intel_vga_redisable(i915);
+	intel_vga_redisable(display);
 
 	if (!state)
 		return 0;

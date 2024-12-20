@@ -224,7 +224,6 @@ static const struct mdp_kms_funcs kms_funcs = {
 		.prepare_commit  = mdp5_prepare_commit,
 		.wait_flush      = mdp5_wait_flush,
 		.complete_commit = mdp5_complete_commit,
-		.get_format      = mdp_get_format,
 		.destroy         = mdp5_kms_destroy,
 	},
 	.set_irqmask         = mdp5_set_irqmask,
@@ -909,7 +908,7 @@ MODULE_DEVICE_TABLE(of, mdp5_dt_match);
 
 static struct platform_driver mdp5_driver = {
 	.probe = mdp5_dev_probe,
-	.remove_new = mdp5_dev_remove,
+	.remove = mdp5_dev_remove,
 	.shutdown = msm_kms_shutdown,
 	.driver = {
 		.name = "msm_mdp",

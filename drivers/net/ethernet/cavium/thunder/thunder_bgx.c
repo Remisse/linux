@@ -54,7 +54,7 @@ struct lmac {
 	bool			link_up;
 	int			lmacid; /* ID within BGX */
 	int			lmacid_bd; /* ID on board */
-	struct net_device       netdev;
+	struct net_device       *netdev;
 	struct phy_device       *phydev;
 	unsigned int            last_duplex;
 	unsigned int            last_link;
@@ -590,10 +590,12 @@ static void bgx_sgmii_change_link_state(struct lmac *lmac)
 
 static void bgx_lmac_handler(struct net_device *netdev)
 {
-	struct lmac *lmac = container_of(netdev, struct lmac, netdev);
 	struct phy_device *phydev;
+	struct lmac *lmac, **priv;
 	int link_changed = 0;
 
+	priv = netdev_priv(netdev);
+	lmac = *priv;
 	phydev = lmac->phydev;
 
 	if (!phydev->link && lmac->last_link)
@@ -1116,7 +1118,7 @@ static int bgx_lmac_enable(struct bgx *bgx, u8 lmacid)
 		}
 		lmac->phydev->dev_flags = 0;
 
-		if (phy_connect_direct(&lmac->netdev, lmac->phydev,
+		if (phy_connect_direct(lmac->netdev, lmac->phydev,
 				       bgx_lmac_handler,
 				       phy_interface_mode(lmac->lmac_type)))
 			return -ENODEV;
@@ -1324,5 +1326,413 @@ static void bgx_set_lmac_config(struct bgx *bgx, u8 idx)
 	u8 lmac_type;
 	u8 lane_to_sds;
 
-	lmac = &bgx->lmac[lmacid];
-	                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+	lmac = &bgx->lmac[idx];
+
+	if (!bgx->is_dlm || bgx->is_rgx) {
+		/* Read LMAC0 type to figure out QLM mode
+		 * This is configured by low level firmware
+		 */
+		cmr_cfg = bgx_reg_read(bgx, 0, BGX_CMRX_CFG);
+		lmac->lmac_type = (cmr_cfg >> 8) & 0x07;
+		if (bgx->is_rgx)
+			lmac->lmac_type = BGX_MODE_RGMII;
+		lmac_set_training(bgx, lmac, 0);
+		lmac_set_lane2sds(bgx, lmac);
+		return;
+	}
+
+	/* For DLMs or SLMs on 80/81/83xx so many lane configurations
+	 * are possible and vary across boards. Also Kernel doesn't have
+	 * any way to identify board type/info and since firmware does,
+	 * just take lmac type and serdes lane config as is.
+	 */
+	cmr_cfg = bgx_reg_read(bgx, idx, BGX_CMRX_CFG);
+	lmac_type = (u8)((cmr_cfg >> 8) & 0x07);
+	lane_to_sds = (u8)(cmr_cfg & 0xFF);
+	/* Check if config is reset value */
+	if ((lmac_type == 0) && (lane_to_sds == 0xE4))
+		lmac->lmac_type = BGX_MODE_INVALID;
+	else
+		lmac->lmac_type = lmac_type;
+	lmac->lane_to_sds = lane_to_sds;
+	lmac_set_training(bgx, lmac, lmac->lmacid);
+}
+
+static void bgx_get_qlm_mode(struct bgx *bgx)
+{
+	struct lmac *lmac;
+	u8  idx;
+
+	/* Init all LMAC's type to invalid */
+	for (idx = 0; idx < bgx->max_lmac; idx++) {
+		lmac = &bgx->lmac[idx];
+		lmac->lmacid = idx;
+		lmac->lmac_type = BGX_MODE_INVALID;
+		lmac->use_training = false;
+	}
+
+	/* It is assumed that low level firmware sets this value */
+	bgx->lmac_count = bgx_reg_read(bgx, 0, BGX_CMR_RX_LMACS) & 0x7;
+	if (bgx->lmac_count > bgx->max_lmac)
+		bgx->lmac_count = bgx->max_lmac;
+
+	for (idx = 0; idx < bgx->lmac_count; idx++) {
+		bgx_set_lmac_config(bgx, idx);
+		bgx_print_qlm_mode(bgx, idx);
+	}
+}
+
+#ifdef CONFIG_ACPI
+
+static int acpi_get_mac_address(struct device *dev, struct acpi_device *adev,
+				u8 *dst)
+{
+	u8 mac[ETH_ALEN];
+	int ret;
+
+	ret = fwnode_get_mac_address(acpi_fwnode_handle(adev), mac);
+	if (ret) {
+		dev_err(dev, "MAC address invalid: %pM\n", mac);
+		return -EINVAL;
+	}
+
+	dev_info(dev, "MAC address set to: %pM\n", mac);
+
+	ether_addr_copy(dst, mac);
+	return 0;
+}
+
+/* Currently only sets the MAC address. */
+static acpi_status bgx_acpi_register_phy(acpi_handle handle,
+					 u32 lvl, void *context, void **rv)
+{
+	struct bgx *bgx = context;
+	struct device *dev = &bgx->pdev->dev;
+	struct acpi_device *adev;
+
+	adev = acpi_fetch_acpi_dev(handle);
+	if (!adev)
+		goto out;
+
+	acpi_get_mac_address(dev, adev, bgx->lmac[bgx->acpi_lmac_idx].mac);
+
+	SET_NETDEV_DEV(bgx->lmac[bgx->acpi_lmac_idx].netdev, dev);
+
+	bgx->lmac[bgx->acpi_lmac_idx].lmacid = bgx->acpi_lmac_idx;
+	bgx->acpi_lmac_idx++; /* move to next LMAC */
+out:
+	return AE_OK;
+}
+
+static acpi_status bgx_acpi_match_id(acpi_handle handle, u32 lvl,
+				     void *context, void **ret_val)
+{
+	struct acpi_buffer string = { ACPI_ALLOCATE_BUFFER, NULL };
+	struct bgx *bgx = context;
+	char bgx_sel[5];
+
+	snprintf(bgx_sel, 5, "BGX%d", bgx->bgx_id);
+	if (ACPI_FAILURE(acpi_get_name(handle, ACPI_SINGLE_NAME, &string))) {
+		pr_warn("Invalid link device\n");
+		return AE_OK;
+	}
+
+	if (strncmp(string.pointer, bgx_sel, 4)) {
+		kfree(string.pointer);
+		return AE_OK;
+	}
+
+	acpi_walk_namespace(ACPI_TYPE_DEVICE, handle, 1,
+			    bgx_acpi_register_phy, NULL, bgx, NULL);
+
+	kfree(string.pointer);
+	return AE_CTRL_TERMINATE;
+}
+
+static int bgx_init_acpi_phy(struct bgx *bgx)
+{
+	acpi_get_devices(NULL, bgx_acpi_match_id, bgx, (void **)NULL);
+	return 0;
+}
+
+#else
+
+static int bgx_init_acpi_phy(struct bgx *bgx)
+{
+	return -ENODEV;
+}
+
+#endif /* CONFIG_ACPI */
+
+#if IS_ENABLED(CONFIG_OF_MDIO)
+
+static int bgx_init_of_phy(struct bgx *bgx)
+{
+	struct fwnode_handle *fwn;
+	struct device_node *node = NULL;
+	u8 lmac = 0;
+
+	device_for_each_child_node(&bgx->pdev->dev, fwn) {
+		struct phy_device *pd;
+		struct device_node *phy_np;
+
+		/* Should always be an OF node.  But if it is not, we
+		 * cannot handle it, so exit the loop.
+		 */
+		node = to_of_node(fwn);
+		if (!node)
+			break;
+
+		of_get_mac_address(node, bgx->lmac[lmac].mac);
+
+		SET_NETDEV_DEV(bgx->lmac[lmac].netdev, &bgx->pdev->dev);
+		bgx->lmac[lmac].lmacid = lmac;
+
+		phy_np = of_parse_phandle(node, "phy-handle", 0);
+		/* If there is no phy or defective firmware presents
+		 * this cortina phy, for which there is no driver
+		 * support, ignore it.
+		 */
+		if (phy_np &&
+		    !of_device_is_compatible(phy_np, "cortina,cs4223-slice")) {
+			/* Wait until the phy drivers are available */
+			pd = of_phy_find_device(phy_np);
+			if (!pd)
+				goto defer;
+			bgx->lmac[lmac].phydev = pd;
+		}
+
+		lmac++;
+		if (lmac == bgx->max_lmac) {
+			of_node_put(node);
+			break;
+		}
+	}
+	return 0;
+
+defer:
+	/* We are bailing out, try not to leak device reference counts
+	 * for phy devices we may have already found.
+	 */
+	while (lmac) {
+		if (bgx->lmac[lmac].phydev) {
+			put_device(&bgx->lmac[lmac].phydev->mdio.dev);
+			bgx->lmac[lmac].phydev = NULL;
+		}
+		lmac--;
+	}
+	of_node_put(node);
+	return -EPROBE_DEFER;
+}
+
+#else
+
+static int bgx_init_of_phy(struct bgx *bgx)
+{
+	return -ENODEV;
+}
+
+#endif /* CONFIG_OF_MDIO */
+
+static int bgx_init_phy(struct bgx *bgx)
+{
+	if (!acpi_disabled)
+		return bgx_init_acpi_phy(bgx);
+
+	return bgx_init_of_phy(bgx);
+}
+
+static irqreturn_t bgx_intr_handler(int irq, void *data)
+{
+	struct bgx *bgx = (struct bgx *)data;
+	u64 status, val;
+	int lmac;
+
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
+		status = bgx_reg_read(bgx, lmac, BGX_GMP_GMI_TXX_INT);
+		if (status & GMI_TXX_INT_UNDFLW) {
+			pci_err(bgx->pdev, "BGX%d lmac%d UNDFLW\n",
+				bgx->bgx_id, lmac);
+			val = bgx_reg_read(bgx, lmac, BGX_CMRX_CFG);
+			val &= ~CMR_EN;
+			bgx_reg_write(bgx, lmac, BGX_CMRX_CFG, val);
+			val |= CMR_EN;
+			bgx_reg_write(bgx, lmac, BGX_CMRX_CFG, val);
+		}
+		/* clear interrupts */
+		bgx_reg_write(bgx, lmac, BGX_GMP_GMI_TXX_INT, status);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static void bgx_register_intr(struct pci_dev *pdev)
+{
+	struct bgx *bgx = pci_get_drvdata(pdev);
+	int ret;
+
+	ret = pci_alloc_irq_vectors(pdev, BGX_LMAC_VEC_OFFSET,
+				    BGX_LMAC_VEC_OFFSET, PCI_IRQ_ALL_TYPES);
+	if (ret < 0) {
+		pci_err(pdev, "Req for #%d msix vectors failed\n",
+			BGX_LMAC_VEC_OFFSET);
+		return;
+	}
+	ret = pci_request_irq(pdev, GMPX_GMI_TX_INT, bgx_intr_handler, NULL,
+			      bgx, "BGX%d", bgx->bgx_id);
+	if (ret)
+		pci_free_irq(pdev, GMPX_GMI_TX_INT, bgx);
+}
+
+static int bgx_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+{
+	int err;
+	struct device *dev = &pdev->dev;
+	struct bgx *bgx = NULL;
+	u8 lmac;
+	u16 sdevid;
+
+	bgx = devm_kzalloc(dev, sizeof(*bgx), GFP_KERNEL);
+	if (!bgx)
+		return -ENOMEM;
+	bgx->pdev = pdev;
+
+	pci_set_drvdata(pdev, bgx);
+
+	err = pcim_enable_device(pdev);
+	if (err) {
+		pci_set_drvdata(pdev, NULL);
+		return dev_err_probe(dev, err, "Failed to enable PCI device\n");
+	}
+
+	err = pci_request_regions(pdev, DRV_NAME);
+	if (err) {
+		dev_err(dev, "PCI request regions failed 0x%x\n", err);
+		goto err_disable_device;
+	}
+
+	/* MAP configuration registers */
+	bgx->reg_base = pcim_iomap(pdev, PCI_CFG_REG_BAR_NUM, 0);
+	if (!bgx->reg_base) {
+		dev_err(dev, "BGX: Cannot map CSR memory space, aborting\n");
+		err = -ENOMEM;
+		goto err_release_regions;
+	}
+
+	set_max_bgx_per_node(pdev);
+
+	pci_read_config_word(pdev, PCI_DEVICE_ID, &sdevid);
+	if (sdevid != PCI_DEVICE_ID_THUNDER_RGX) {
+		bgx->bgx_id = (pci_resource_start(pdev,
+			PCI_CFG_REG_BAR_NUM) >> 24) & BGX_ID_MASK;
+		bgx->bgx_id += nic_get_node_id(pdev) * max_bgx_per_node;
+		bgx->max_lmac = MAX_LMAC_PER_BGX;
+		bgx_vnic[bgx->bgx_id] = bgx;
+	} else {
+		bgx->is_rgx = true;
+		bgx->max_lmac = 1;
+		bgx->bgx_id = MAX_BGX_PER_CN81XX - 1;
+		bgx_vnic[bgx->bgx_id] = bgx;
+		xcv_init_hw();
+	}
+
+	/* On 81xx all are DLMs and on 83xx there are 3 BGX QLMs and one
+	 * BGX i.e BGX2 can be split across 2 DLMs.
+	 */
+	pci_read_config_word(pdev, PCI_SUBSYSTEM_ID, &sdevid);
+	if ((sdevid == PCI_SUBSYS_DEVID_81XX_BGX) ||
+	    ((sdevid == PCI_SUBSYS_DEVID_83XX_BGX) && (bgx->bgx_id == 2)))
+		bgx->is_dlm = true;
+
+	bgx_get_qlm_mode(bgx);
+
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
+		struct lmac *lmacp, **priv;
+
+		lmacp = &bgx->lmac[lmac];
+		lmacp->netdev = alloc_netdev_dummy(sizeof(struct lmac *));
+
+		if (!lmacp->netdev) {
+			for (int i = 0; i < lmac; i++)
+				free_netdev(bgx->lmac[i].netdev);
+			err = -ENOMEM;
+			goto err_enable;
+		}
+
+		priv = netdev_priv(lmacp->netdev);
+		*priv = lmacp;
+	}
+
+	err = bgx_init_phy(bgx);
+	if (err)
+		goto err_enable;
+
+	bgx_init_hw(bgx);
+
+	bgx_register_intr(pdev);
+
+	/* Enable all LMACs */
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
+		err = bgx_lmac_enable(bgx, lmac);
+		if (err) {
+			dev_err(dev, "BGX%d failed to enable lmac%d\n",
+				bgx->bgx_id, lmac);
+			while (lmac)
+				bgx_lmac_disable(bgx, --lmac);
+			goto err_enable;
+		}
+	}
+
+	return 0;
+
+err_enable:
+	bgx_vnic[bgx->bgx_id] = NULL;
+	pci_free_irq(pdev, GMPX_GMI_TX_INT, bgx);
+err_release_regions:
+	pci_release_regions(pdev);
+err_disable_device:
+	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
+	return err;
+}
+
+static void bgx_remove(struct pci_dev *pdev)
+{
+	struct bgx *bgx = pci_get_drvdata(pdev);
+	u8 lmac;
+
+	/* Disable all LMACs */
+	for (lmac = 0; lmac < bgx->lmac_count; lmac++) {
+		bgx_lmac_disable(bgx, lmac);
+		free_netdev(bgx->lmac[lmac].netdev);
+	}
+
+	pci_free_irq(pdev, GMPX_GMI_TX_INT, bgx);
+
+	bgx_vnic[bgx->bgx_id] = NULL;
+	pci_release_regions(pdev);
+	pci_disable_device(pdev);
+	pci_set_drvdata(pdev, NULL);
+}
+
+static struct pci_driver bgx_driver = {
+	.name = DRV_NAME,
+	.id_table = bgx_id_table,
+	.probe = bgx_probe,
+	.remove = bgx_remove,
+};
+
+static int __init bgx_init_module(void)
+{
+	pr_info("%s, ver %s\n", DRV_NAME, DRV_VERSION);
+
+	return pci_register_driver(&bgx_driver);
+}
+
+static void __exit bgx_cleanup_module(void)
+{
+	pci_unregister_driver(&bgx_driver);
+}
+
+module_init(bgx_init_module);
+module_exit(bgx_cleanup_module);

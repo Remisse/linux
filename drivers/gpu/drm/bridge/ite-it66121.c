@@ -770,8 +770,6 @@ void it66121_bridge_mode_set(struct drm_bridge *bridge,
 
 	mutex_lock(&ctx->lock);
 
-	hdmi_avi_infoframe_init(&ctx->hdmi_avi_infoframe);
-
 	ret = drm_hdmi_avi_infoframe_from_display_mode(&ctx->hdmi_avi_infoframe, ctx->connector,
 						       adjusted_mode);
 	if (ret) {
@@ -1540,12 +1538,6 @@ static int it66121_probe(struct i2c_client *client)
 		return -EINVAL;
 	}
 
-	if (!of_device_is_available(ep)) {
-		of_node_put(ep);
-		dev_err(ctx->dev, "The remote device is disabled\n");
-		return -ENODEV;
-	}
-
 	ctx->next_bridge = of_drm_find_bridge(ep);
 	of_node_put(ep);
 	if (!ctx->next_bridge) {
@@ -1586,13 +1578,18 @@ static int it66121_probe(struct i2c_client *client)
 	ctx->bridge.funcs = &it66121_bridge_funcs;
 	ctx->bridge.of_node = dev->of_node;
 	ctx->bridge.type = DRM_MODE_CONNECTOR_HDMIA;
-	ctx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID | DRM_BRIDGE_OP_HPD;
+	ctx->bridge.ops = DRM_BRIDGE_OP_DETECT | DRM_BRIDGE_OP_EDID;
+	if (client->irq > 0) {
+		ctx->bridge.ops |= DRM_BRIDGE_OP_HPD;
 
-	ret = devm_request_threaded_irq(dev, client->irq, NULL,	it66121_irq_threaded_handler,
-					IRQF_ONESHOT, dev_name(dev), ctx);
-	if (ret < 0) {
-		dev_err(dev, "Failed to request irq %d:%d\n", client->irq, ret);
-		return ret;
+		ret = devm_request_threaded_irq(dev, client->irq, NULL,
+						it66121_irq_threaded_handler,
+						IRQF_ONESHOT, dev_name(dev),
+						ctx);
+		if (ret < 0) {
+			dev_err(dev, "Failed to request irq %d:%d\n", client->irq, ret);
+			return ret;
+		}
 	}
 
 	it66121_audio_codec_init(ctx, dev);

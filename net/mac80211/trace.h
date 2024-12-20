@@ -33,7 +33,7 @@
 			__string(vif_name, sdata->name)
 #define VIF_ASSIGN	__entry->vif_type = sdata->vif.type; __entry->sdata = sdata;	\
 			__entry->p2p = sdata->vif.p2p;					\
-			__assign_str(vif_name, sdata->name)
+			__assign_str(vif_name)
 #define VIF_PR_FMT	" vif:%s(%d%s)"
 #define VIF_PR_ARG	__get_str(vif_name), __entry->vif_type, __entry->p2p ? "/p2p" : ""
 
@@ -328,9 +328,18 @@ TRACE_EVENT(drv_set_wakeup,
 	TP_printk(LOCAL_PR_FMT " enabled:%d", LOCAL_PR_ARG, __entry->enabled)
 );
 
-DEFINE_EVENT(local_only_evt, drv_stop,
-	TP_PROTO(struct ieee80211_local *local),
-	TP_ARGS(local)
+TRACE_EVENT(drv_stop,
+	TP_PROTO(struct ieee80211_local *local, bool suspend),
+	TP_ARGS(local, suspend),
+	TP_STRUCT__entry(
+		LOCAL_ENTRY
+		__field(bool, suspend)
+	),
+	TP_fast_assign(
+		LOCAL_ASSIGN;
+		__entry->suspend = suspend;
+	),
+	TP_printk(LOCAL_PR_FMT " suspend:%d", LOCAL_PR_ARG, __entry->suspend)
 );
 
 DEFINE_EVENT(local_sdata_addr_evt, drv_add_interface,
@@ -930,31 +939,34 @@ TRACE_EVENT(drv_sta_set_txpwr,
 	)
 );
 
-TRACE_EVENT(drv_sta_rc_update,
+TRACE_EVENT(drv_link_sta_rc_update,
 	TP_PROTO(struct ieee80211_local *local,
 		 struct ieee80211_sub_if_data *sdata,
-		 struct ieee80211_sta *sta,
+		 struct ieee80211_link_sta *link_sta,
 		 u32 changed),
 
-	TP_ARGS(local, sdata, sta, changed),
+	TP_ARGS(local, sdata, link_sta, changed),
 
 	TP_STRUCT__entry(
 		LOCAL_ENTRY
 		VIF_ENTRY
 		STA_ENTRY
 		__field(u32, changed)
+		__field(u32, link_id)
 	),
 
 	TP_fast_assign(
 		LOCAL_ASSIGN;
 		VIF_ASSIGN;
-		STA_ASSIGN;
+		STA_NAMED_ASSIGN(link_sta->sta);
 		__entry->changed = changed;
+		__entry->link_id = link_sta->link_id;
 	),
 
 	TP_printk(
-		LOCAL_PR_FMT  VIF_PR_FMT  STA_PR_FMT " changed: 0x%x",
-		LOCAL_PR_ARG, VIF_PR_ARG, STA_PR_ARG, __entry->changed
+		LOCAL_PR_FMT  VIF_PR_FMT  STA_PR_FMT " (link %d) changed: 0x%x",
+		LOCAL_PR_ARG, VIF_PR_ARG, STA_PR_ARG, __entry->link_id,
+		__entry->changed
 	)
 );
 
@@ -3145,6 +3157,25 @@ TRACE_EVENT(drv_neg_ttlm_res,
 		  LOCAL_PR_ARG, VIF_PR_ARG, __entry->res
 	)
 );
+
+TRACE_EVENT(drv_prep_add_interface,
+	    TP_PROTO(struct ieee80211_local *local,
+		     enum nl80211_iftype type),
+
+	TP_ARGS(local, type),
+	TP_STRUCT__entry(LOCAL_ENTRY
+			 __field(u32, type)
+	),
+
+	TP_fast_assign(LOCAL_ASSIGN;
+		       __entry->type = type;
+	),
+
+	TP_printk(LOCAL_PR_FMT  " type: %u\n ",
+		  LOCAL_PR_ARG, __entry->type
+	)
+);
+
 #endif /* !__MAC80211_DRIVER_TRACE || TRACE_HEADER_MULTI_READ */
 
 #undef TRACE_INCLUDE_PATH

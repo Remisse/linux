@@ -113,6 +113,14 @@ enum ta_ras_address_type {
 	TA_RAS_PA_TO_MCA,
 };
 
+enum ta_ras_nps_mode {
+	TA_RAS_UNKNOWN_MODE = 0,
+	TA_RAS_NPS1_MODE = 1,
+	TA_RAS_NPS2_MODE = 2,
+	TA_RAS_NPS4_MODE = 4,
+	TA_RAS_NPS8_MODE = 8,
+};
+
 /* Input/output structures for RAS commands */
 /**********************************************************/
 
@@ -139,6 +147,7 @@ struct ta_ras_init_flags {
 	uint8_t dgpu_mode;
 	uint16_t xcc_mask;
 	uint8_t channel_dis_num;
+	uint8_t nps_mode;
 };
 
 struct ta_ras_mca_addr {
@@ -146,6 +155,7 @@ struct ta_ras_mca_addr {
 	uint32_t ch_inst;
 	uint32_t umc_inst;
 	uint32_t node_inst;
+	uint32_t socket_id;
 };
 
 struct ta_ras_phy_addr {

@@ -33,7 +33,6 @@
 //! we do not need to specify ids for the fields.
 //!
 //! ```
-//! use kernel::prelude::*;
 //! use kernel::sync::Arc;
 //! use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
 //!
@@ -53,7 +52,7 @@
 //!         Arc::pin_init(pin_init!(MyStruct {
 //!             value,
 //!             work <- new_work!("MyStruct::work"),
-//!         }))
+//!         }), GFP_KERNEL)
 //!     }
 //! }
 //!
@@ -75,7 +74,6 @@
 //! The following example shows how multiple `work_struct` fields can be used:
 //!
 //! ```
-//! use kernel::prelude::*;
 //! use kernel::sync::Arc;
 //! use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
 //!
@@ -101,7 +99,7 @@
 //!             value_2,
 //!             work_1 <- new_work!("MyStruct::work_1"),
 //!             work_2 <- new_work!("MyStruct::work_2"),
-//!         }))
+//!         }), GFP_KERNEL)
 //!     }
 //! }
 //!
@@ -132,11 +130,9 @@
 //!
 //! C header: [`include/linux/workqueue.h`](srctree/include/linux/workqueue.h)
 
-use crate::{bindings, prelude::*, sync::Arc, sync::LockClassKey, types::Opaque};
-use alloc::alloc::AllocError;
-use alloc::boxed::Box;
+use crate::alloc::{AllocError, Flags};
+use crate::{prelude::*, sync::Arc, sync::LockClassKey, types::Opaque};
 use core::marker::PhantomData;
-use core::pin::Pin;
 
 /// Creates a [`Work`] initialiser with the given name and a newly-created lock class.
 #[macro_export]
@@ -210,13 +206,17 @@ impl Queue {
     /// Tries to spawn the given function or closure as a work item.
     ///
     /// This method can fail because it allocates memory to store the work item.
-    pub fn try_spawn<T: 'static + Send + FnOnce()>(&self, func: T) -> Result<(), AllocError> {
+    pub fn try_spawn<T: 'static + Send + FnOnce()>(
+        &self,
+        flags: Flags,
+        func: T,
+    ) -> Result<(), AllocError> {
         let init = pin_init!(ClosureWork {
             work <- new_work!("Queue::try_spawn"),
             func: Some(func),
         });
 
-        self.enqueue(Box::pin_init(init).map_err(|_| AllocError)?);
+        self.enqueue(KBox::pin_init(init, flags).map_err(|_| AllocError)?);
         Ok(())
     }
 }
@@ -239,9 +239,9 @@ impl<T> ClosureWork<T> {
 }
 
 impl<T: FnOnce()> WorkItem for ClosureWork<T> {
-    type Pointer = Pin<Box<Self>>;
+    type Pointer = Pin<KBox<Self>>;
 
-    fn run(mut this: Pin<Box<Self>>) {
+    fn run(mut this: Pin<KBox<Self>>) {
         if let Some(func) = this.as_mut().project().take() {
             (func)()
         }
@@ -297,7 +297,7 @@ pub unsafe trait RawWorkItem<const ID: u64> {
 
 /// Defines the method that should be called directly when a work item is executed.
 ///
-/// This trait is implemented by `Pin<Box<T>>` and [`Arc<T>`], and is mainly intended to be
+/// This trait is implemented by `Pin<KBox<T>>` and [`Arc<T>`], and is mainly intended to be
 /// implemented for smart pointer types. For your own structs, you would implement [`WorkItem`]
 /// instead. The [`run`] method on this trait will usually just perform the appropriate
 /// `container_of` translation and then call into the [`run`][WorkItem::run] method from the
@@ -329,7 +329,7 @@ pub unsafe trait WorkItemPointer<const ID: u64>: RawWorkItem<ID> {
 /// This trait is used when the `work_struct` field is defined using the [`Work`] helper.
 pub trait WorkItem<const ID: u64 = 0> {
     /// The pointer type that this struct is wrapped in. This will typically be `Arc<Self>` or
-    /// `Pin<Box<Self>>`.
+    /// `Pin<KBox<Self>>`.
     type Pointer: WorkItemPointer<ID>;
 
     /// The method that should be called when this work item is executed.
@@ -346,8 +346,10 @@ pub trait WorkItem<const ID: u64 = 0> {
 /// This is a helper type used to associate a `work_struct` with the [`WorkItem`] that uses it.
 ///
 /// [`run`]: WorkItemPointer::run
+#[pin_data]
 #[repr(transparent)]
 pub struct Work<T: ?Sized, const ID: u64 = 0> {
+    #[pin]
     work: Opaque<bindings::work_struct>,
     _inner: PhantomData<T>,
 }
@@ -364,26 +366,26 @@ unsafe impl<T: ?Sized, const ID: u64> Sync for Work<T, ID> {}
 impl<T: ?Sized, const ID: u64> Work<T, ID> {
     /// Creates a new instance of [`Work`].
     #[inline]
-    #[allow(clippy::new_ret_no_self)]
     pub fn new(name: &'static CStr, key: &'static LockClassKey) -> impl PinInit<Self>
     where
         T: WorkItem<ID>,
     {
-        // SAFETY: The `WorkItemPointer` implementation promises that `run` can be used as the work
-        // item function.
-        unsafe {
-            kernel::init::pin_init_from_closure(move |slot| {
-                let slot = Self::raw_get(slot);
-                bindings::init_work_with_key(
-                    slot,
-                    Some(T::Pointer::run),
-                    false,
-                    name.as_char_ptr(),
-                    key.as_ptr(),
-                );
-                Ok(())
-            })
-        }
+        pin_init!(Self {
+            work <- Opaque::ffi_init(|slot| {
+                // SAFETY: The `WorkItemPointer` implementation promises that `run` can be used as
+                // the work item function.
+                unsafe {
+                    bindings::init_work_with_key(
+                        slot,
+                        Some(T::Pointer::run),
+                        false,
+                        name.as_char_ptr(),
+                        key.as_ptr(),
+                    )
+                }
+            }),
+            _inner: PhantomData,
+        })
     }
 
     /// Get a pointer to the inner `work_struct`.
@@ -408,7 +410,6 @@ impl<T: ?Sized, const ID: u64> Work<T, ID> {
 /// like this:
 ///
 /// ```no_run
-/// use kernel::prelude::*;
 /// use kernel::workqueue::{impl_has_work, Work};
 ///
 /// struct MyWorkItem {
@@ -480,24 +481,26 @@ pub unsafe trait HasWork<T, const ID: u64 = 0> {
 /// use kernel::sync::Arc;
 /// use kernel::workqueue::{self, impl_has_work, Work};
 ///
-/// struct MyStruct {
-///     work_field: Work<MyStruct, 17>,
+/// struct MyStruct<'a, T, const N: usize> {
+///     work_field: Work<MyStruct<'a, T, N>, 17>,
+///     f: fn(&'a [T; N]),
 /// }
 ///
 /// impl_has_work! {
-///     impl HasWork<MyStruct, 17> for MyStruct { self.work_field }
+///     impl{'a, T, const N: usize} HasWork<MyStruct<'a, T, N>, 17>
+///     for MyStruct<'a, T, N> { self.work_field }
 /// }
 /// ```
 #[macro_export]
 macro_rules! impl_has_work {
-    ($(impl$(<$($implarg:ident),*>)?
+    ($(impl$({$($generics:tt)*})?
        HasWork<$work_type:ty $(, $id:tt)?>
-       for $self:ident $(<$($selfarg:ident),*>)?
+       for $self:ty
        { self.$field:ident }
     )*) => {$(
         // SAFETY: The implementation of `raw_get_work` only compiles if the field has the right
         // type.
-        unsafe impl$(<$($implarg),*>)? $crate::workqueue::HasWork<$work_type $(, $id)?> for $self $(<$($selfarg),*>)? {
+        unsafe impl$(<$($generics)+>)? $crate::workqueue::HasWork<$work_type $(, $id)?> for $self {
             const OFFSET: usize = ::core::mem::offset_of!(Self, $field) as usize;
 
             #[inline]
@@ -513,16 +516,17 @@ macro_rules! impl_has_work {
 pub use impl_has_work;
 
 impl_has_work! {
-    impl<T> HasWork<Self> for ClosureWork<T> { self.work }
+    impl{T} HasWork<Self> for ClosureWork<T> { self.work }
 }
 
+// SAFETY: TODO.
 unsafe impl<T, const ID: u64> WorkItemPointer<ID> for Arc<T>
 where
     T: WorkItem<ID, Pointer = Self>,
     T: HasWork<T, ID>,
 {
     unsafe extern "C" fn run(ptr: *mut bindings::work_struct) {
-        // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<T, ID>`.
+        // The `__enqueue` method always uses a `work_struct` stored in a `Work<T, ID>`.
         let ptr = ptr as *mut Work<T, ID>;
         // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
         let ptr = unsafe { T::work_container_of(ptr) };
@@ -533,6 +537,7 @@ where
     }
 }
 
+// SAFETY: TODO.
 unsafe impl<T, const ID: u64> RawWorkItem<ID> for Arc<T>
 where
     T: WorkItem<ID, Pointer = Self>,
@@ -561,18 +566,19 @@ where
     }
 }
 
-unsafe impl<T, const ID: u64> WorkItemPointer<ID> for Pin<Box<T>>
+// SAFETY: TODO.
+unsafe impl<T, const ID: u64> WorkItemPointer<ID> for Pin<KBox<T>>
 where
     T: WorkItem<ID, Pointer = Self>,
     T: HasWork<T, ID>,
 {
     unsafe extern "C" fn run(ptr: *mut bindings::work_struct) {
-        // SAFETY: The `__enqueue` method always uses a `work_struct` stored in a `Work<T, ID>`.
+        // The `__enqueue` method always uses a `work_struct` stored in a `Work<T, ID>`.
         let ptr = ptr as *mut Work<T, ID>;
         // SAFETY: This computes the pointer that `__enqueue` got from `Arc::into_raw`.
         let ptr = unsafe { T::work_container_of(ptr) };
         // SAFETY: This pointer comes from `Arc::into_raw` and we've been given back ownership.
-        let boxed = unsafe { Box::from_raw(ptr) };
+        let boxed = unsafe { KBox::from_raw(ptr) };
         // SAFETY: The box was already pinned when it was enqueued.
         let pinned = unsafe { Pin::new_unchecked(boxed) };
 
@@ -580,7 +586,8 @@ where
     }
 }
 
-unsafe impl<T, const ID: u64> RawWorkItem<ID> for Pin<Box<T>>
+// SAFETY: TODO.
+unsafe impl<T, const ID: u64> RawWorkItem<ID> for Pin<KBox<T>>
 where
     T: WorkItem<ID, Pointer = Self>,
     T: HasWork<T, ID>,
@@ -594,9 +601,9 @@ where
         // SAFETY: We're not going to move `self` or any of its fields, so its okay to temporarily
         // remove the `Pin` wrapper.
         let boxed = unsafe { Pin::into_inner_unchecked(self) };
-        let ptr = Box::into_raw(boxed);
+        let ptr = KBox::into_raw(boxed);
 
-        // SAFETY: Pointers into a `Box` point at a valid value.
+        // SAFETY: Pointers into a `KBox` point at a valid value.
         let work_ptr = unsafe { T::raw_get_work(ptr) };
         // SAFETY: `raw_get_work` returns a pointer to a valid value.
         let work_ptr = unsafe { Work::raw_get(work_ptr) };

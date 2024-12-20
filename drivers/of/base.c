@@ -16,6 +16,7 @@
 
 #define pr_fmt(fmt)	"OF: " fmt
 
+#include <linux/cleanup.h>
 #include <linux/console.h>
 #include <linux/ctype.h>
 #include <linux/cpu.h>
@@ -86,15 +87,25 @@ static bool __of_node_is_type(const struct device_node *np, const char *type)
 	return np && match && type && !strcmp(match, type);
 }
 
+#define EXCLUDED_DEFAULT_CELLS_PLATFORMS ( \
+	IS_ENABLED(CONFIG_SPARC) \
+)
+
 int of_bus_n_addr_cells(struct device_node *np)
 {
 	u32 cells;
 
-	for (; np; np = np->parent)
+	for (; np; np = np->parent) {
 		if (!of_property_read_u32(np, "#address-cells", &cells))
 			return cells;
-
-	/* No #address-cells property for the root node */
+		/*
+		 * Default root value and walking parent nodes for "#address-cells"
+		 * is deprecated. Any platforms which hit this warning should
+		 * be added to the excluded list.
+		 */
+		WARN_ONCE(!EXCLUDED_DEFAULT_CELLS_PLATFORMS,
+			  "Missing '#address-cells' in %pOF\n", np);
+	}
 	return OF_ROOT_NODE_ADDR_CELLS_DEFAULT;
 }
 
@@ -111,11 +122,17 @@ int of_bus_n_size_cells(struct device_node *np)
 {
 	u32 cells;
 
-	for (; np; np = np->parent)
+	for (; np; np = np->parent) {
 		if (!of_property_read_u32(np, "#size-cells", &cells))
 			return cells;
-
-	/* No #size-cells property for the root node */
+		/*
+		 * Default root value and walking parent nodes for "#size-cells"
+		 * is deprecated. Any platforms which hit this warning should
+		 * be added to the excluded list.
+		 */
+		WARN_ONCE(!EXCLUDED_DEFAULT_CELLS_PLATFORMS,
+			  "Missing '#size-cells' in %pOF\n", np);
+	}
 	return OF_ROOT_NODE_SIZE_CELLS_DEFAULT;
 }
 
@@ -269,7 +286,7 @@ EXPORT_SYMBOL(of_find_all_nodes);
 const void *__of_get_property(const struct device_node *np,
 			      const char *name, int *lenp)
 {
-	struct property *pp = __of_find_property(np, name, lenp);
+	const struct property *pp = __of_find_property(np, name, lenp);
 
 	return pp ? pp->value : NULL;
 }
@@ -281,7 +298,7 @@ const void *__of_get_property(const struct device_node *np,
 const void *of_get_property(const struct device_node *np, const char *name,
 			    int *lenp)
 {
-	struct property *pp = of_find_property(np, name, lenp);
+	const struct property *pp = of_find_property(np, name, lenp);
 
 	return pp ? pp->value : NULL;
 }
@@ -320,7 +337,7 @@ EXPORT_SYMBOL(of_get_property);
 static int __of_device_is_compatible(const struct device_node *device,
 				     const char *compat, const char *type, const char *name)
 {
-	struct property *prop;
+	const struct property *prop;
 	const char *cp;
 	int index = 0, score = 0;
 
@@ -627,6 +644,42 @@ struct device_node *of_get_next_child(const struct device_node *node,
 }
 EXPORT_SYMBOL(of_get_next_child);
 
+/**
+ * of_get_next_child_with_prefix - Find the next child node with prefix
+ * @node:	parent node
+ * @prev:	previous child of the parent node, or NULL to get first
+ * @prefix:	prefix that the node name should have
+ *
+ * This function is like of_get_next_child(), except that it automatically
+ * skips any nodes whose name doesn't have the given prefix.
+ *
+ * Return: A node pointer with refcount incremented, use
+ * of_node_put() on it when done.
+ */
+struct device_node *of_get_next_child_with_prefix(const struct device_node *node,
+						  struct device_node *prev,
+						  const char *prefix)
+{
+	struct device_node *next;
+	unsigned long flags;
+
+	if (!node)
+		return NULL;
+
+	raw_spin_lock_irqsave(&devtree_lock, flags);
+	next = prev ? prev->sibling : node->child;
+	for (; next; next = next->sibling) {
+		if (!of_node_name_prefix(next, prefix))
+			continue;
+		if (of_node_get(next))
+			break;
+	}
+	of_node_put(prev);
+	raw_spin_unlock_irqrestore(&devtree_lock, flags);
+	return next;
+}
+EXPORT_SYMBOL(of_get_next_child_with_prefix);
+
 static struct device_node *of_get_next_status_child(const struct device_node *node,
 						    struct device_node *prev,
 						    bool (*checker)(const struct device_node *))
@@ -770,7 +823,7 @@ struct device_node *of_get_child_by_name(const struct device_node *node,
 }
 EXPORT_SYMBOL(of_get_child_by_name);
 
-struct device_node *__of_find_node_by_path(struct device_node *parent,
+struct device_node *__of_find_node_by_path(const struct device_node *parent,
 						const char *path)
 {
 	struct device_node *child;
@@ -827,7 +880,7 @@ struct device_node *__of_find_node_by_full_path(struct device_node *node,
 struct device_node *of_find_node_opts_by_path(const char *path, const char **opts)
 {
 	struct device_node *np = NULL;
-	struct property *pp;
+	const struct property *pp;
 	unsigned long flags;
 	const char *separator = strchr(path, ':');
 
@@ -973,7 +1026,7 @@ struct device_node *of_find_node_with_property(struct device_node *from,
 	const char *prop_name)
 {
 	struct device_node *np;
-	struct property *pp;
+	const struct property *pp;
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&devtree_lock, flags);
@@ -1393,8 +1446,10 @@ int of_parse_phandle_with_args_map(const struct device_node *np,
 				   const char *stem_name,
 				   int index, struct of_phandle_args *out_args)
 {
-	char *cells_name, *map_name = NULL, *mask_name = NULL;
-	char *pass_name = NULL;
+	char *cells_name __free(kfree) = kasprintf(GFP_KERNEL, "#%s-cells", stem_name);
+	char *map_name __free(kfree) = kasprintf(GFP_KERNEL, "%s-map", stem_name);
+	char *mask_name __free(kfree) = kasprintf(GFP_KERNEL, "%s-map-mask", stem_name);
+	char *pass_name __free(kfree) = kasprintf(GFP_KERNEL, "%s-map-pass-thru", stem_name);
 	struct device_node *cur, *new = NULL;
 	const __be32 *map, *mask, *pass;
 	static const __be32 dummy_mask[] = { [0 ... MAX_PHANDLE_ARGS] = cpu_to_be32(~0) };
@@ -1407,27 +1462,13 @@ int of_parse_phandle_with_args_map(const struct device_node *np,
 	if (index < 0)
 		return -EINVAL;
 
-	cells_name = kasprintf(GFP_KERNEL, "#%s-cells", stem_name);
-	if (!cells_name)
+	if (!cells_name || !map_name || !mask_name || !pass_name)
 		return -ENOMEM;
-
-	ret = -ENOMEM;
-	map_name = kasprintf(GFP_KERNEL, "%s-map", stem_name);
-	if (!map_name)
-		goto free;
-
-	mask_name = kasprintf(GFP_KERNEL, "%s-map-mask", stem_name);
-	if (!mask_name)
-		goto free;
-
-	pass_name = kasprintf(GFP_KERNEL, "%s-map-pass-thru", stem_name);
-	if (!pass_name)
-		goto free;
 
 	ret = __of_parse_phandle_with_args(np, list_name, cells_name, -1, index,
 					   out_args);
 	if (ret)
-		goto free;
+		return ret;
 
 	/* Get the #<list>-cells property */
 	cur = out_args->np;
@@ -1444,8 +1485,7 @@ int of_parse_phandle_with_args_map(const struct device_node *np,
 		/* Get the <list>-map property */
 		map = of_get_property(cur, map_name, &map_len);
 		if (!map) {
-			ret = 0;
-			goto free;
+			return 0;
 		}
 		map_len /= sizeof(u32);
 
@@ -1521,12 +1561,6 @@ int of_parse_phandle_with_args_map(const struct device_node *np,
 put:
 	of_node_put(cur);
 	of_node_put(new);
-free:
-	kfree(mask_name);
-	kfree(map_name);
-	kfree(cells_name);
-	kfree(pass_name);
-
 	return ret;
 }
 EXPORT_SYMBOL(of_parse_phandle_with_args_map);
@@ -1787,7 +1821,7 @@ static void of_alias_add(struct alias_prop *ap, struct device_node *np,
  */
 void of_alias_scan(void * (*dt_alloc)(u64 size, u64 align))
 {
-	struct property *pp;
+	const struct property *pp;
 
 	of_aliases = of_find_node_by_path("/aliases");
 	of_chosen = of_find_node_by_path("/chosen");
@@ -1858,7 +1892,7 @@ void of_alias_scan(void * (*dt_alloc)(u64 size, u64 align))
  *
  * Return: The alias id if found.
  */
-int of_alias_get_id(struct device_node *np, const char *stem)
+int of_alias_get_id(const struct device_node *np, const char *stem)
 {
 	struct alias_prop *app;
 	int id = -ENODEV;
@@ -1916,7 +1950,7 @@ EXPORT_SYMBOL_GPL(of_alias_get_highest_id);
  *
  * Return: TRUE if console successfully setup. Otherwise return FALSE.
  */
-bool of_console_check(struct device_node *dn, char *name, int index)
+bool of_console_check(const struct device_node *dn, char *name, int index)
 {
 	if (!dn || dn != of_stdout || console_set_on_cmdline)
 		return false;
@@ -2004,7 +2038,7 @@ int of_find_last_cache_level(unsigned int cpu)
  *
  * Return: 0 on success or a standard error code on failure.
  */
-int of_map_id(struct device_node *np, u32 id,
+int of_map_id(const struct device_node *np, u32 id,
 	       const char *map_name, const char *map_mask_name,
 	       struct device_node **target, u32 *id_out)
 {

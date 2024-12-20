@@ -1587,7 +1587,7 @@ static int tsnep_rx_poll_zc(struct tsnep_rx *rx, struct napi_struct *napi,
 		length = __le32_to_cpu(entry->desc_wb->properties) &
 			 TSNEP_DESC_LENGTH_MASK;
 		xsk_buff_set_size(entry->xdp, length - ETH_FCS_LEN);
-		xsk_buff_dma_sync_for_cpu(entry->xdp, rx->xsk_pool);
+		xsk_buff_dma_sync_for_cpu(entry->xdp);
 
 		/* RX metadata with timestamps is in front of actual data,
 		 * subtract metadata size to get length of actual data and
@@ -2689,7 +2689,7 @@ static struct platform_driver tsnep_driver = {
 		.of_match_table = tsnep_of_match,
 	},
 	.probe = tsnep_probe,
-	.remove_new = tsnep_remove,
+	.remove = tsnep_remove,
 };
 module_platform_driver(tsnep_driver);
 

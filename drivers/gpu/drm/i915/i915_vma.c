@@ -1776,8 +1776,6 @@ static void release_references(struct i915_vma *vma, struct intel_gt *gt,
 	if (vm_ddestroy)
 		i915_vm_resv_put(vma->vm);
 
-	/* Wait for async active retire */
-	i915_active_wait(&vma->active);
 	i915_active_fini(&vma->active);
 	GEM_WARN_ON(vma->resource);
 	i915_vma_free(vma);
@@ -2159,7 +2157,7 @@ static struct dma_fence *__i915_vma_unbind_async(struct i915_vma *vma)
 int i915_vma_unbind(struct i915_vma *vma)
 {
 	struct i915_address_space *vm = vma->vm;
-	intel_wakeref_t wakeref = 0;
+	intel_wakeref_t wakeref = NULL;
 	int err;
 
 	assert_object_held_shared(vma->obj);
@@ -2198,7 +2196,7 @@ int i915_vma_unbind_async(struct i915_vma *vma, bool trylock_vm)
 {
 	struct drm_i915_gem_object *obj = vma->obj;
 	struct i915_address_space *vm = vma->vm;
-	intel_wakeref_t wakeref = 0;
+	intel_wakeref_t wakeref = NULL;
 	struct dma_fence *fence;
 	int err;
 

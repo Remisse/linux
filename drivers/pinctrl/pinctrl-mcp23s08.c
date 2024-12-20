@@ -569,7 +569,7 @@ static void mcp23s08_irq_print_chip(struct irq_data *d, struct seq_file *p)
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
 	struct mcp23s08 *mcp = gpiochip_get_data(gc);
 
-	seq_printf(p, dev_name(mcp->dev));
+	seq_puts(p, dev_name(mcp->dev));
 }
 
 static const struct irq_chip mcp23s08_irq_chip = {
@@ -696,4 +696,5 @@ int mcp23s08_probe_one(struct mcp23s08 *mcp, struct device *dev,
 }
 EXPORT_SYMBOL_GPL(mcp23s08_probe_one);
 
+MODULE_DESCRIPTION("MCP23S08 SPI/I2C GPIO driver");
 MODULE_LICENSE("GPL");

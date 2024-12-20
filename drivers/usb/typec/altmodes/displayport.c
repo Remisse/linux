@@ -729,7 +729,7 @@ int dp_altmode_probe(struct typec_altmode *alt)
 
 	/* FIXME: Port can only be DFP_U. */
 
-	/* Make sure we have compatiple pin configurations */
+	/* Make sure we have compatible pin configurations */
 	if (!(DP_CAP_PIN_ASSIGN_DFP_D(port->vdo) &
 	      DP_CAP_PIN_ASSIGN_UFP_D(alt->vdo)) &&
 	    !(DP_CAP_PIN_ASSIGN_UFP_D(port->vdo) &
@@ -746,7 +746,7 @@ int dp_altmode_probe(struct typec_altmode *alt)
 	dp->alt = alt;
 
 	alt->desc = "DisplayPort";
-	alt->ops = &dp_altmode_ops;
+	typec_altmode_set_ops(alt, &dp_altmode_ops);
 
 	if (plug) {
 		plug->desc = "Displayport";
@@ -802,7 +802,6 @@ static struct typec_altmode_driver dp_altmode_driver = {
 	.remove = dp_altmode_remove,
 	.driver = {
 		.name = "typec_displayport",
-		.owner = THIS_MODULE,
 		.dev_groups = displayport_groups,
 	},
 };

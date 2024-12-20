@@ -338,6 +338,7 @@ static void default_serial_dl_write(struct uart_8250_port *up, u32 value)
 	serial_out(up, UART_DLM, value >> 8 & 0xff);
 }
 
+#ifdef CONFIG_HAS_IOPORT
 static unsigned int hub6_serial_in(struct uart_port *p, int offset)
 {
 	offset = offset << p->regshift;
@@ -351,6 +352,7 @@ static void hub6_serial_out(struct uart_port *p, int offset, int value)
 	outb(p->hub6 - 1 + offset, p->iobase);
 	outb(value, p->iobase + 1);
 }
+#endif /* CONFIG_HAS_IOPORT */
 
 static unsigned int mem_serial_in(struct uart_port *p, int offset)
 {
@@ -400,6 +402,7 @@ static unsigned int mem32be_serial_in(struct uart_port *p, int offset)
 	return ioread32be(p->membase + offset);
 }
 
+#ifdef CONFIG_HAS_IOPORT
 static unsigned int io_serial_in(struct uart_port *p, int offset)
 {
 	offset = offset << p->regshift;
@@ -410,6 +413,15 @@ static void io_serial_out(struct uart_port *p, int offset, int value)
 {
 	offset = offset << p->regshift;
 	outb(value, p->iobase + offset);
+}
+#endif
+static unsigned int no_serial_in(struct uart_port *p, int offset)
+{
+	return (unsigned int)-1;
+}
+
+static void no_serial_out(struct uart_port *p, int offset, int value)
+{
 }
 
 static int serial8250_default_handle_irq(struct uart_port *port);
@@ -422,10 +434,12 @@ static void set_io_from_upio(struct uart_port *p)
 	up->dl_write = default_serial_dl_write;
 
 	switch (p->iotype) {
+#ifdef CONFIG_HAS_IOPORT
 	case UPIO_HUB6:
 		p->serial_in = hub6_serial_in;
 		p->serial_out = hub6_serial_out;
 		break;
+#endif
 
 	case UPIO_MEM:
 		p->serial_in = mem_serial_in;
@@ -446,11 +460,17 @@ static void set_io_from_upio(struct uart_port *p)
 		p->serial_in = mem32be_serial_in;
 		p->serial_out = mem32be_serial_out;
 		break;
-
-	default:
+#ifdef CONFIG_HAS_IOPORT
+	case UPIO_PORT:
 		p->serial_in = io_serial_in;
 		p->serial_out = io_serial_out;
 		break;
+#endif
+	default:
+		WARN(p->iotype != UPIO_PORT || p->iobase,
+		     "Unsupported UART type %x\n", p->iotype);
+		p->serial_in = no_serial_in;
+		p->serial_out = no_serial_out;
 	}
 	/* Remember loaded iotype */
 	up->cur_iotype = p->iotype;
@@ -611,13 +631,6 @@ int serial8250_em485_config(struct uart_port *port, struct ktermios *termios,
 			    struct serial_rs485 *rs485)
 {
 	struct uart_8250_port *up = up_to_u8250p(port);
-
-	/* pick sane settings if the user hasn't */
-	if (!!(rs485->flags & SER_RS485_RTS_ON_SEND) ==
-	    !!(rs485->flags & SER_RS485_RTS_AFTER_SEND)) {
-		rs485->flags |= SER_RS485_RTS_ON_SEND;
-		rs485->flags &= ~SER_RS485_RTS_AFTER_SEND;
-	}
 
 	/*
 	 * Both serial8250_em485_init() and serial8250_em485_destroy()
@@ -1181,7 +1194,7 @@ static void autoconfig(struct uart_8250_port *up)
 		 */
 		scratch = serial_in(up, UART_IER);
 		serial_out(up, UART_IER, 0);
-#ifdef __i386__
+#if defined(__i386__) && defined(CONFIG_HAS_IOPORT)
 		outb(0xff, 0x080);
 #endif
 		/*
@@ -1190,7 +1203,7 @@ static void autoconfig(struct uart_8250_port *up)
 		 */
 		scratch2 = serial_in(up, UART_IER) & UART_IER_ALL_INTR;
 		serial_out(up, UART_IER, UART_IER_ALL_INTR);
-#ifdef __i386__
+#if defined(__i386__) && defined(CONFIG_HAS_IOPORT)
 		outb(0, 0x080);
 #endif
 		scratch3 = serial_in(up, UART_IER) & UART_IER_ALL_INTR;
@@ -1630,7 +1643,7 @@ static void serial8250_start_tx(struct uart_port *port)
 	/* Port locked to synchronize UART_IER access against the console. */
 	lockdep_assert_held_once(&port->lock);
 
-	if (!port->x_char && uart_circ_empty(&port->state->xmit))
+	if (!port->x_char && kfifo_is_empty(&port->state->port.xmit_fifo))
 		return;
 
 	serial8250_rpm_get_tx(up);
@@ -1778,7 +1791,7 @@ EXPORT_SYMBOL_GPL(serial8250_rx_chars);
 void serial8250_tx_chars(struct uart_8250_port *up)
 {
 	struct uart_port *port = &up->port;
-	struct circ_buf *xmit = &port->state->xmit;
+	struct tty_port *tport = &port->state->port;
 	int count;
 
 	if (port->x_char) {
@@ -1789,14 +1802,19 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 		serial8250_stop_tx(port);
 		return;
 	}
-	if (uart_circ_empty(xmit)) {
+	if (kfifo_is_empty(&tport->xmit_fifo)) {
 		__stop_tx(up);
 		return;
 	}
 
 	count = up->tx_loadsz;
 	do {
-		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
+		unsigned char c;
+
+		if (!uart_fifo_get(port, &c))
+			break;
+
+		serial_out(up, UART_TX, c);
 		if (up->bugs & UART_BUG_TXRACE) {
 			/*
 			 * The Aspeed BMC virtual UARTs have a bug where data
@@ -1809,9 +1827,7 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 			 */
 			serial_in(up, UART_SCR);
 		}
-		uart_xmit_advance(port, 1);
-		if (uart_circ_empty(xmit))
-			break;
+
 		if ((up->capabilities & UART_CAP_HFIFO) &&
 		    !uart_lsr_tx_empty(serial_in(up, UART_LSR)))
 			break;
@@ -1821,7 +1837,7 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 			break;
 	} while (--count > 0);
 
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
 
 	/*
@@ -1829,7 +1845,8 @@ void serial8250_tx_chars(struct uart_8250_port *up)
 	 * HW can go idle. So we get here once again with empty FIFO and disable
 	 * the interrupt and RPM in __stop_tx()
 	 */
-	if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM))
+	if (kfifo_is_empty(&tport->xmit_fifo) &&
+	    !(up->capabilities & UART_CAP_RPM))
 		__stop_tx(up);
 }
 EXPORT_SYMBOL_GPL(serial8250_tx_chars);
@@ -2612,7 +2629,7 @@ static unsigned char serial8250_compute_lcr(struct uart_8250_port *up,
 }
 
 void serial8250_do_set_divisor(struct uart_port *port, unsigned int baud,
-			       unsigned int quot, unsigned int quot_frac)
+			       unsigned int quot)
 {
 	struct uart_8250_port *up = up_to_u8250p(port);
 
@@ -2644,7 +2661,7 @@ static void serial8250_set_divisor(struct uart_port *port, unsigned int baud,
 	if (port->set_divisor)
 		port->set_divisor(port, baud, quot, quot_frac);
 	else
-		serial8250_do_set_divisor(port, baud, quot, quot_frac);
+		serial8250_do_set_divisor(port, baud, quot);
 }
 
 static unsigned int serial8250_get_baud_rate(struct uart_port *port,
@@ -3179,7 +3196,7 @@ static void serial8250_config_port(struct uart_port *port, int flags)
 static int
 serial8250_verify_port(struct uart_port *port, struct serial_struct *ser)
 {
-	if (ser->irq >= nr_irqs || ser->irq < 0 ||
+	if (ser->irq >= irq_get_nr_irqs() || ser->irq < 0 ||
 	    ser->baud_base < 9600 || ser->type < PORT_UNKNOWN ||
 	    ser->type >= ARRAY_SIZE(uart_config) || ser->type == PORT_CIRRUS ||
 	    ser->type == PORT_STARTECH)
@@ -3476,4 +3493,5 @@ int serial8250_console_exit(struct uart_port *port)
 
 #endif /* CONFIG_SERIAL_8250_CONSOLE */
 
+MODULE_DESCRIPTION("Base port operations for 8250/16550-type serial ports");
 MODULE_LICENSE("GPL");

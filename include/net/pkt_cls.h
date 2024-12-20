@@ -74,6 +74,15 @@ static inline bool tcf_block_non_null_shared(struct tcf_block *block)
 	return block && block->index;
 }
 
+#ifdef CONFIG_NET_CLS_ACT
+DECLARE_STATIC_KEY_FALSE(tcf_bypass_check_needed_key);
+
+static inline bool tcf_block_bypass_sw(struct tcf_block *block)
+{
+	return block && block->bypass_wanted;
+}
+#endif
+
 static inline struct Qdisc *tcf_block_q(struct tcf_block *block)
 {
 	WARN_ON(tcf_block_shared(block));
@@ -482,7 +491,7 @@ int __tcf_em_tree_match(struct sk_buff *, struct tcf_ematch_tree *,
 			struct tcf_pkt_info *);
 
 /**
- * tcf_em_tree_match - evaulate an ematch tree
+ * tcf_em_tree_match - evaluate an ematch tree
  *
  * @skb: socket buffer of the packet in question
  * @tree: ematch tree to be used for evaluation
@@ -746,6 +755,7 @@ tc_cls_common_offload_init(struct flow_cls_common_offload *cls_common,
 	cls_common->chain_index = tp->chain->index;
 	cls_common->protocol = tp->protocol;
 	cls_common->prio = tp->prio >> 16;
+	cls_common->skip_sw = tc_skip_sw(flags);
 	if (tc_skip_sw(flags) || flags & TCA_CLS_FLAGS_VERBOSE)
 		cls_common->extack = extack;
 }

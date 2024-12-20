@@ -2179,7 +2179,6 @@ enum {
 #define IXGBE_PCI_LINK_SPEED_5000 0x2
 #define IXGBE_PCI_LINK_SPEED_8000 0x3
 #define IXGBE_PCI_HEADER_TYPE_REGISTER  0x0E
-#define IXGBE_PCI_HEADER_TYPE_MULTIFUNC 0x80
 #define IXGBE_PCI_DEVICE_CONTROL2_16ms  0x0005
 
 #define IXGBE_PCIDEVCTRL2_TIMEO_MASK	0xf
@@ -3602,19 +3601,6 @@ struct ixgbe_phy_info {
 	u32				nw_mng_if_sel;
 };
 
-#include "ixgbe_mbx.h"
-
-struct ixgbe_mbx_operations {
-	int (*init_params)(struct ixgbe_hw *hw);
-	int (*read)(struct ixgbe_hw *, u32 *, u16,  u16);
-	int (*write)(struct ixgbe_hw *, u32 *, u16, u16);
-	int (*read_posted)(struct ixgbe_hw *, u32 *, u16,  u16);
-	int (*write_posted)(struct ixgbe_hw *, u32 *, u16, u16);
-	int (*check_for_msg)(struct ixgbe_hw *, u16);
-	int (*check_for_ack)(struct ixgbe_hw *, u16);
-	int (*check_for_rst)(struct ixgbe_hw *, u16);
-};
-
 struct ixgbe_mbx_stats {
 	u32 msgs_tx;
 	u32 msgs_rx;
@@ -3623,6 +3609,8 @@ struct ixgbe_mbx_stats {
 	u32 reqs;
 	u32 rsts;
 };
+
+struct ixgbe_mbx_operations;
 
 struct ixgbe_mbx_info {
 	const struct ixgbe_mbx_operations *ops;
@@ -3676,9 +3664,7 @@ struct ixgbe_info {
 #define IXGBE_KRM_LINK_S1(P)		((P) ? 0x8200 : 0x4200)
 #define IXGBE_KRM_LINK_CTRL_1(P)	((P) ? 0x820C : 0x420C)
 #define IXGBE_KRM_AN_CNTL_1(P)		((P) ? 0x822C : 0x422C)
-#define IXGBE_KRM_AN_CNTL_4(P)		((P) ? 0x8238 : 0x4238)
 #define IXGBE_KRM_AN_CNTL_8(P)		((P) ? 0x8248 : 0x4248)
-#define IXGBE_KRM_PCS_KX_AN(P)		((P) ? 0x9918 : 0x5918)
 #define IXGBE_KRM_SGMII_CTRL(P)		((P) ? 0x82A0 : 0x42A0)
 #define IXGBE_KRM_LP_BASE_PAGE_HIGH(P)	((P) ? 0x836C : 0x436C)
 #define IXGBE_KRM_DSP_TXFFE_STATE_4(P)	((P) ? 0x8634 : 0x4634)
@@ -3688,7 +3674,6 @@ struct ixgbe_info {
 #define IXGBE_KRM_PMD_FLX_MASK_ST20(P)	((P) ? 0x9054 : 0x5054)
 #define IXGBE_KRM_TX_COEFF_CTRL_1(P)	((P) ? 0x9520 : 0x5520)
 #define IXGBE_KRM_RX_ANA_CTL(P)		((P) ? 0x9A00 : 0x5A00)
-#define IXGBE_KRM_FLX_TMRS_CTRL_ST31(P)	((P) ? 0x9180 : 0x5180)
 
 #define IXGBE_KRM_PMD_FLX_MASK_ST20_SFI_10G_DA		~(0x3 << 20)
 #define IXGBE_KRM_PMD_FLX_MASK_ST20_SFI_10G_SR		BIT(20)

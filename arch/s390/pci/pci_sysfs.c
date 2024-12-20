@@ -23,7 +23,7 @@ static ssize_t name##_show(struct device *dev,				\
 {									\
 	struct zpci_dev *zdev = to_zpci(to_pci_dev(dev));		\
 									\
-	return sprintf(buf, fmt, zdev->member);				\
+	return sysfs_emit(buf, fmt, zdev->member);				\
 }									\
 static DEVICE_ATTR_RO(name)
 
@@ -34,6 +34,7 @@ zpci_attr(pfgid, "0x%02x\n", pfgid);
 zpci_attr(vfn, "0x%04x\n", vfn);
 zpci_attr(pft, "0x%02x\n", pft);
 zpci_attr(port, "%d\n", port);
+zpci_attr(fidparm, "0x%02x\n", fidparm);
 zpci_attr(uid, "0x%x\n", uid);
 zpci_attr(segment0, "0x%02x\n", pfip[0]);
 zpci_attr(segment1, "0x%02x\n", pfip[1]);
@@ -45,7 +46,7 @@ static ssize_t mio_enabled_show(struct device *dev,
 {
 	struct zpci_dev *zdev = to_zpci(to_pci_dev(dev));
 
-	return sprintf(buf, zpci_use_mio(zdev) ? "1\n" : "0\n");
+	return sysfs_emit(buf, zpci_use_mio(zdev) ? "1\n" : "0\n");
 }
 static DEVICE_ATTR_RO(mio_enabled);
 
@@ -172,7 +173,6 @@ static ssize_t uid_is_unique_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(uid_is_unique);
 
-#ifndef CONFIG_DMI
 /* analogous to smbios index */
 static ssize_t index_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
@@ -198,11 +198,10 @@ static struct attribute *zpci_ident_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group zpci_ident_attr_group = {
+const struct attribute_group zpci_ident_attr_group = {
 	.attrs = zpci_ident_attrs,
 	.is_visible = zpci_index_is_visible,
 };
-#endif
 
 static struct bin_attribute *zpci_bin_attrs[] = {
 	&bin_attr_util_string,
@@ -217,6 +216,7 @@ static struct attribute *zpci_dev_attrs[] = {
 	&dev_attr_pfgid.attr,
 	&dev_attr_pft.attr,
 	&dev_attr_port.attr,
+	&dev_attr_fidparm.attr,
 	&dev_attr_vfn.attr,
 	&dev_attr_uid.attr,
 	&dev_attr_recover.attr,
@@ -225,7 +225,7 @@ static struct attribute *zpci_dev_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group zpci_attr_group = {
+const struct attribute_group zpci_attr_group = {
 	.attrs = zpci_dev_attrs,
 	.bin_attrs = zpci_bin_attrs,
 };
@@ -237,16 +237,8 @@ static struct attribute *pfip_attrs[] = {
 	&dev_attr_segment3.attr,
 	NULL,
 };
-static struct attribute_group pfip_attr_group = {
+
+const struct attribute_group pfip_attr_group = {
 	.name = "pfip",
 	.attrs = pfip_attrs,
-};
-
-const struct attribute_group *zpci_attr_groups[] = {
-	&zpci_attr_group,
-	&pfip_attr_group,
-#ifndef CONFIG_DMI
-	&zpci_ident_attr_group,
-#endif
-	NULL,
 };

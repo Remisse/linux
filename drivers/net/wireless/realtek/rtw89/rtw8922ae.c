@@ -9,6 +9,12 @@
 #include "reg.h"
 #include "rtw8922a.h"
 
+static const struct rtw89_pci_ssid_quirk rtw8922a_pci_ssid_quirks[] = {
+	{RTW89_PCI_SSID(PCI_VENDOR_ID_REALTEK, 0x8922, 0x10EC, 0xA891, DELL),
+	 .bitmap = BIT(RTW89_QUIRK_THERMAL_PROT_120C)},
+	{},
+};
+
 static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.gen_def		= &rtw89_pci_gen_be,
 	.txbd_trunc_mode	= MAC_AX_BD_TRUNC,
@@ -46,6 +52,7 @@ static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.rpwm_addr		= R_BE_PCIE_HRPWM,
 	.cpwm_addr		= R_BE_PCIE_CRPWM,
 	.mit_addr		= R_BE_PCIE_MIT_CH_EN,
+	.wp_sel_addr		= R_BE_WP_ADDR_H_SEL0_3_V1,
 	.tx_dma_ch_mask		= 0,
 	.bd_idx_addr_low_power	= NULL,
 	.dma_addr_set		= &rtw89_pci_ch_dma_addr_set_be,
@@ -57,10 +64,13 @@ static const struct rtw89_pci_info rtw8922a_pci_info = {
 	.enable_intr		= rtw89_pci_enable_intr_v2,
 	.disable_intr		= rtw89_pci_disable_intr_v2,
 	.recognize_intrs	= rtw89_pci_recognize_intrs_v2,
+
+	.ssid_quirks		= rtw8922a_pci_ssid_quirks,
 };
 
 static const struct rtw89_driver_info rtw89_8922ae_info = {
 	.chip = &rtw8922a_chip_info,
+	.quirks = NULL,
 	.bus = {
 		.pci = &rtw8922a_pci_info,
 	},

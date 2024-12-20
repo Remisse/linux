@@ -481,8 +481,10 @@ static void sec_alg_resource_free(struct sec_ctx *ctx,
 
 	if (ctx->pbuf_supported)
 		sec_free_pbuf_resource(dev, qp_ctx->res);
-	if (ctx->alg_type == SEC_AEAD)
+	if (ctx->alg_type == SEC_AEAD) {
 		sec_free_mac_resource(dev, qp_ctx->res);
+		sec_free_aiv_resource(dev, qp_ctx->res);
+	}
 }
 
 static int sec_alloc_qp_ctx_resource(struct sec_ctx *ctx, struct sec_qp_ctx *qp_ctx)
@@ -2518,8 +2520,8 @@ int sec_register_to_crypto(struct hisi_qm *qm)
 	u64 alg_mask;
 	int ret = 0;
 
-	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_IDX,
-				      SEC_DRV_ALG_BITMAP_LOW_IDX);
+	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_TB,
+				      SEC_DRV_ALG_BITMAP_LOW_TB);
 
 	mutex_lock(&sec_algs_lock);
 	if (sec_available_devs) {
@@ -2551,8 +2553,8 @@ void sec_unregister_from_crypto(struct hisi_qm *qm)
 {
 	u64 alg_mask;
 
-	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_IDX,
-				      SEC_DRV_ALG_BITMAP_LOW_IDX);
+	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_TB,
+				      SEC_DRV_ALG_BITMAP_LOW_TB);
 
 	mutex_lock(&sec_algs_lock);
 	if (--sec_available_devs)

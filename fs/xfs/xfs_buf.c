@@ -494,6 +494,9 @@ _xfs_buf_obj_cmp(
 		 * it stale has not yet committed. i.e. we are
 		 * reallocating a busy extent. Skip this buffer and
 		 * continue searching for an exact match.
+		 *
+		 * Note: If we're scanning for incore buffers to stale, don't
+		 * complain if we find non-stale buffers.
 		 */
 		if (!(map->bm_flags & XBM_LIVESCAN))
 			ASSERT(bp->b_flags & XBF_STALE);
@@ -1854,7 +1857,6 @@ static enum lru_status
 xfs_buftarg_drain_rele(
 	struct list_head	*item,
 	struct list_lru_one	*lru,
-	spinlock_t		*lru_lock,
 	void			*arg)
 
 {
@@ -1953,7 +1955,6 @@ static enum lru_status
 xfs_buftarg_isolate(
 	struct list_head	*item,
 	struct list_lru_one	*lru,
-	spinlock_t		*lru_lock,
 	void			*arg)
 {
 	struct xfs_buf		*bp = container_of(item, struct xfs_buf, b_lru);
@@ -2043,7 +2044,7 @@ xfs_setsize_buftarg(
 	btp->bt_meta_sectorsize = sectorsize;
 	btp->bt_meta_sectormask = sectorsize - 1;
 
-	if (set_blocksize(btp->bt_bdev, sectorsize)) {
+	if (set_blocksize(btp->bt_bdev_file, sectorsize)) {
 		xfs_warn(btp->bt_mount,
 			"Cannot set_blocksize to %u on device %pg",
 			sectorsize, btp->bt_bdev);
@@ -2111,6 +2112,13 @@ xfs_alloc_buftarg(
 	btp->bt_dev = btp->bt_bdev->bd_dev;
 	btp->bt_daxdev = fs_dax_get_by_bdev(btp->bt_bdev, &btp->bt_dax_part_off,
 					    mp, ops);
+
+	if (bdev_can_atomic_write(btp->bt_bdev)) {
+		btp->bt_bdev_awu_min = bdev_atomic_write_unit_min_bytes(
+						btp->bt_bdev);
+		btp->bt_bdev_awu_max = bdev_atomic_write_unit_max_bytes(
+						btp->bt_bdev);
+	}
 
 	/*
 	 * When allocating the buftargs we have not yet read the super block and

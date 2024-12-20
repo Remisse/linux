@@ -49,9 +49,10 @@ static DEFINE_SPINLOCK(acaddr_hash_lock);
 
 static int ipv6_dev_ac_dec(struct net_device *dev, const struct in6_addr *addr);
 
-static u32 inet6_acaddr_hash(struct net *net, const struct in6_addr *addr)
+static u32 inet6_acaddr_hash(const struct net *net,
+			     const struct in6_addr *addr)
 {
-	u32 val = ipv6_addr_hash(addr) ^ net_hash_mix(net);
+	u32 val = __ipv6_addr_jhash(addr, net_hash_mix(net));
 
 	return hash_32(val, IN6_ADDR_HSIZE_SHIFT);
 }
@@ -252,9 +253,8 @@ static void aca_free_rcu(struct rcu_head *h)
 
 static void aca_put(struct ifacaddr6 *ac)
 {
-	if (refcount_dec_and_test(&ac->aca_refcnt)) {
-		call_rcu(&ac->rcu, aca_free_rcu);
-	}
+	if (refcount_dec_and_test(&ac->aca_refcnt))
+		call_rcu_hurry(&ac->rcu, aca_free_rcu);
 }
 
 static struct ifacaddr6 *aca_alloc(struct fib6_info *f6i,

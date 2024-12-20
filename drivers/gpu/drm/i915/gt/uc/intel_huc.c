@@ -385,7 +385,7 @@ int intel_huc_init(struct intel_huc *huc)
 	if (HAS_ENGINE(gt, GSC0)) {
 		struct i915_vma *vma;
 
-		vma = intel_guc_allocate_vma(&gt->uc.guc, PXP43_HUC_AUTH_INOUT_SIZE * 2);
+		vma = intel_guc_allocate_vma(gt_to_guc(gt), PXP43_HUC_AUTH_INOUT_SIZE * 2);
 		if (IS_ERR(vma)) {
 			err = PTR_ERR(vma);
 			huc_info(huc, "Failed to allocate heci pkt\n");
@@ -455,7 +455,7 @@ static const char *auth_mode_string(struct intel_huc *huc,
  * an end user should hit the timeout is in case of extreme thermal throttling.
  * And a system that is that hot during boot is probably dead anyway!
  */
-#if defined(CONFIG_DRM_I915_DEBUG_GEM)
+#if IS_ENABLED(CONFIG_DRM_I915_DEBUG_GEM)
 #define HUC_LOAD_RETRY_LIMIT   20
 #else
 #define HUC_LOAD_RETRY_LIMIT   3
@@ -540,7 +540,7 @@ int intel_huc_wait_for_auth_complete(struct intel_huc *huc,
 int intel_huc_auth(struct intel_huc *huc, enum intel_huc_authentication_type type)
 {
 	struct intel_gt *gt = huc_to_gt(huc);
-	struct intel_guc *guc = &gt->uc.guc;
+	struct intel_guc *guc = gt_to_guc(gt);
 	int ret;
 
 	if (!intel_uc_fw_is_loaded(&huc->fw))

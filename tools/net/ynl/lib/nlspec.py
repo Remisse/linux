@@ -131,6 +131,9 @@ class SpecEnumSet(SpecElement):
     def has_doc(self):
         if 'doc' in self.yaml:
             return True
+        return self.has_entry_doc()
+
+    def has_entry_doc(self):
         for entry in self.entries.values():
             if entry.has_doc():
                 return True
@@ -335,6 +338,7 @@ class SpecOperation(SpecElement):
 
         req_value       numerical ID when serialized, user -> kernel
         rsp_value       numerical ID when serialized, user <- kernel
+        modes           supported operation modes (do, dump, event etc.)
         is_call         bool, whether the operation is a call
         is_async        bool, whether the operation is a notification
         is_resv         bool, whether the operation does not exist (it's just a reserved ID)
@@ -350,6 +354,7 @@ class SpecOperation(SpecElement):
         self.req_value = req_value
         self.rsp_value = rsp_value
 
+        self.modes = yaml.keys() & {'do', 'dump', 'event', 'notify'}
         self.is_call = 'do' in yaml or 'dump' in yaml
         self.is_async = 'notify' in yaml or 'event' in yaml
         self.is_resv = not self.is_async and not self.is_call

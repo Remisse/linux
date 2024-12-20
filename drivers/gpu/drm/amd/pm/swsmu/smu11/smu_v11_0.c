@@ -93,8 +93,7 @@ static void smu_v11_0_poll_baco_exit(struct smu_context *smu)
 int smu_v11_0_init_microcode(struct smu_context *smu)
 {
 	struct amdgpu_device *adev = smu->adev;
-	char ucode_prefix[30];
-	char fw_name[SMU_FW_NAME_LEN];
+	char ucode_prefix[25];
 	int err = 0;
 	const struct smc_firmware_header_v1_0 *hdr;
 	const struct common_firmware_header *header;
@@ -106,10 +105,7 @@ int smu_v11_0_init_microcode(struct smu_context *smu)
 		return 0;
 
 	amdgpu_ucode_ip_version_decode(adev, MP1_HWIP, ucode_prefix, sizeof(ucode_prefix));
-
-	snprintf(fw_name, sizeof(fw_name), "amdgpu/%s.bin", ucode_prefix);
-
-	err = amdgpu_ucode_request(adev, &adev->pm.fw, fw_name);
+	err = amdgpu_ucode_request(adev, &adev->pm.fw, "amdgpu/%s.bin", ucode_prefix);
 	if (err)
 		goto out;
 
@@ -1557,23 +1553,27 @@ int smu_v11_0_baco_set_armd3_sequence(struct smu_context *smu,
 	return smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_ArmD3, baco_seq, NULL);
 }
 
-bool smu_v11_0_baco_is_support(struct smu_context *smu)
+int smu_v11_0_get_bamaco_support(struct smu_context *smu)
 {
 	struct smu_baco_context *smu_baco = &smu->smu_baco;
+	int bamaco_support = 0;
 
 	if (amdgpu_sriov_vf(smu->adev) || !smu_baco->platform_support)
-		return false;
+		return 0;
+
+	if (smu_baco->maco_support)
+		bamaco_support |= MACO_SUPPORT;
 
 	/* return true if ASIC is in BACO state already */
 	if (smu_v11_0_baco_get_state(smu) == SMU_BACO_STATE_ENTER)
-		return true;
+		return bamaco_support |= BACO_SUPPORT;
 
 	/* Arcturus does not support this bit mask */
 	if (smu_cmn_feature_is_supported(smu, SMU_FEATURE_BACO_BIT) &&
 	   !smu_cmn_feature_is_enabled(smu, SMU_FEATURE_BACO_BIT))
-		return false;
+		return 0;
 
-	return true;
+	return (bamaco_support |= BACO_SUPPORT);
 }
 
 enum smu_baco_state smu_v11_0_baco_get_state(struct smu_context *smu)
@@ -1603,7 +1603,7 @@ int smu_v11_0_baco_set_state(struct smu_context *smu, enum smu_baco_state state)
 		case IP_VERSION(11, 0, 11):
 		case IP_VERSION(11, 0, 12):
 		case IP_VERSION(11, 0, 13):
-			if (amdgpu_runtime_pm == 2)
+			if (adev->pm.rpm_mode == AMDGPU_RUNPM_BAMACO)
 				ret = smu_cmn_send_smc_msg_with_param(smu,
 								      SMU_MSG_EnterBaco,
 								      D3HOT_BAMACO_SEQUENCE,
@@ -1616,7 +1616,8 @@ int smu_v11_0_baco_set_state(struct smu_context *smu, enum smu_baco_state state)
 			break;
 		default:
 			if (!ras || !adev->ras_enabled ||
-			    adev->gmc.xgmi.pending_reset) {
+			    (adev->init_lvl->level ==
+			     AMDGPU_INIT_LEVEL_MINIMAL_XGMI)) {
 				if (amdgpu_ip_version(adev, MP1_HWIP, 0) ==
 				    IP_VERSION(11, 0, 2)) {
 					data = RREG32_SOC15(THM, 0, mmTHM_BACO_CNTL_ARCT);
@@ -1763,7 +1764,8 @@ failed:
 int smu_v11_0_set_soft_freq_limited_range(struct smu_context *smu,
 					  enum smu_clk_type clk_type,
 					  uint32_t min,
-					  uint32_t max)
+					  uint32_t max,
+					  bool automatic)
 {
 	int ret = 0, clk_id = 0;
 	uint32_t param;
@@ -1778,7 +1780,10 @@ int smu_v11_0_set_soft_freq_limited_range(struct smu_context *smu,
 		return clk_id;
 
 	if (max > 0) {
-		param = (uint32_t)((clk_id << 16) | (max & 0xffff));
+		if (automatic)
+			param = (uint32_t)((clk_id << 16) | 0xffff);
+		else
+			param = (uint32_t)((clk_id << 16) | (max & 0xffff));
 		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetSoftMaxByFreq,
 						  param, NULL);
 		if (ret)
@@ -1786,7 +1791,10 @@ int smu_v11_0_set_soft_freq_limited_range(struct smu_context *smu,
 	}
 
 	if (min > 0) {
-		param = (uint32_t)((clk_id << 16) | (min & 0xffff));
+		if (automatic)
+			param = (uint32_t)((clk_id << 16) | 0);
+		else
+			param = (uint32_t)((clk_id << 16) | (min & 0xffff));
 		ret = smu_cmn_send_smc_msg_with_param(smu, SMU_MSG_SetSoftMinByFreq,
 						  param, NULL);
 		if (ret)
@@ -1854,6 +1862,7 @@ int smu_v11_0_set_performance_level(struct smu_context *smu,
 	uint32_t mclk_min = 0, mclk_max = 0;
 	uint32_t socclk_min = 0, socclk_max = 0;
 	int ret = 0;
+	bool auto_level = false;
 
 	switch (level) {
 	case AMD_DPM_FORCED_LEVEL_HIGH:
@@ -1873,6 +1882,7 @@ int smu_v11_0_set_performance_level(struct smu_context *smu,
 		mclk_max = mem_table->max;
 		socclk_min = soc_table->min;
 		socclk_max = soc_table->max;
+		auto_level = true;
 		break;
 	case AMD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
 		sclk_min = sclk_max = pstate_table->gfxclk_pstate.standard;
@@ -1905,13 +1915,15 @@ int smu_v11_0_set_performance_level(struct smu_context *smu,
 	if (amdgpu_ip_version(adev, MP1_HWIP, 0) == IP_VERSION(11, 0, 2)) {
 		mclk_min = mclk_max = 0;
 		socclk_min = socclk_max = 0;
+		auto_level = false;
 	}
 
 	if (sclk_min && sclk_max) {
 		ret = smu_v11_0_set_soft_freq_limited_range(smu,
 							    SMU_GFXCLK,
 							    sclk_min,
-							    sclk_max);
+							    sclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 	}
@@ -1920,7 +1932,8 @@ int smu_v11_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v11_0_set_soft_freq_limited_range(smu,
 							    SMU_MCLK,
 							    mclk_min,
-							    mclk_max);
+							    mclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 	}
@@ -1929,7 +1942,8 @@ int smu_v11_0_set_performance_level(struct smu_context *smu,
 		ret = smu_v11_0_set_soft_freq_limited_range(smu,
 							    SMU_SOCCLK,
 							    socclk_min,
-							    socclk_max);
+							    socclk_max,
+							    auto_level);
 		if (ret)
 			return ret;
 	}

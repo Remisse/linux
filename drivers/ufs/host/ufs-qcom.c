@@ -93,7 +93,7 @@ static const struct __ufs_qcom_bw_table {
 	[MODE_HS_RB][UFS_HS_G3][UFS_LANE_2] = { 1492582,	204800 },
 	[MODE_HS_RB][UFS_HS_G4][UFS_LANE_2] = { 2915200,	409600 },
 	[MODE_HS_RB][UFS_HS_G5][UFS_LANE_2] = { 5836800,	819200 },
-	[MODE_MAX][0][0]		    = { 7643136,	307200 },
+	[MODE_MAX][0][0]		    = { 7643136,	819200 },
 };
 
 static void ufs_qcom_get_default_testbus_cfg(struct ufs_qcom_host *host);
@@ -284,9 +284,6 @@ static void ufs_qcom_select_unipro_mode(struct ufs_qcom_host *host)
 
 	if (host->hw_ver.major >= 0x05)
 		ufshcd_rmwl(host->hba, QUNIPRO_G4_SEL, 0, REG_UFS_CFG0);
-
-	/* make sure above configuration is applied before we return */
-	mb();
 }
 
 /*
@@ -415,7 +412,7 @@ static void ufs_qcom_enable_hw_clk_gating(struct ufs_hba *hba)
 		    REG_UFS_CFG2);
 
 	/* Ensure that HW clock gating is enabled before next operations */
-	mb();
+	ufshcd_readl(hba, REG_UFS_CFG2);
 }
 
 static int ufs_qcom_hce_enable_notify(struct ufs_hba *hba,
@@ -507,7 +504,7 @@ static int ufs_qcom_cfg_timers(struct ufs_hba *hba, u32 gear,
 		 * make sure above write gets applied before we return from
 		 * this function.
 		 */
-		mb();
+		ufshcd_readl(hba, REG_UFS_SYS1CLK_1US);
 	}
 
 	return 0;
@@ -537,8 +534,7 @@ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
 		 * and device TX LCC are disabled once link startup is
 		 * completed.
 		 */
-		if (ufshcd_get_local_unipro_ver(hba) != UFS_UNIPRO_VER_1_41)
-			err = ufshcd_disable_host_tx_lcc(hba);
+		err = ufshcd_disable_host_tx_lcc(hba);
 
 		break;
 	default:
@@ -696,6 +692,16 @@ static struct __ufs_qcom_bw_table ufs_qcom_get_bw_table(struct ufs_qcom_host *ho
 	int gear = max_t(u32, p->gear_rx, p->gear_tx);
 	int lane = max_t(u32, p->lane_rx, p->lane_tx);
 
+	if (WARN_ONCE(gear > QCOM_UFS_MAX_GEAR,
+		      "ICC scaling for UFS Gear (%d) not supported. Using Gear (%d) bandwidth\n",
+		      gear, QCOM_UFS_MAX_GEAR))
+		gear = QCOM_UFS_MAX_GEAR;
+
+	if (WARN_ONCE(lane > QCOM_UFS_MAX_LANE,
+		      "ICC scaling for UFS Lane (%d) not supported. Using Lane (%d) bandwidth\n",
+		      lane, QCOM_UFS_MAX_LANE))
+		lane = QCOM_UFS_MAX_LANE;
+
 	if (ufshcd_is_hs_mode(p)) {
 		if (p->hs_rate == PA_HS_MODE_B)
 			return ufs_qcom_bw_table[MODE_HS_RB][gear][lane];
@@ -822,10 +828,26 @@ static int ufs_qcom_apply_dev_quirks(struct ufs_hba *hba)
 	if (hba->dev_quirks & UFS_DEVICE_QUIRK_HOST_PA_SAVECONFIGTIME)
 		err = ufs_qcom_quirk_host_pa_saveconfigtime(hba);
 
-	if (hba->dev_info.wmanufacturerid == UFS_VENDOR_WDC)
-		hba->dev_quirks |= UFS_DEVICE_QUIRK_HOST_PA_TACTIVATE;
-
 	return err;
+}
+
+/* UFS device-specific quirks */
+static struct ufs_dev_quirk ufs_qcom_dev_fixups[] = {
+	{ .wmanufacturerid = UFS_VENDOR_SKHYNIX,
+	  .model = UFS_ANY_MODEL,
+	  .quirk = UFS_DEVICE_QUIRK_DELAY_BEFORE_LPM },
+	{ .wmanufacturerid = UFS_VENDOR_TOSHIBA,
+	  .model = UFS_ANY_MODEL,
+	  .quirk = UFS_DEVICE_QUIRK_DELAY_AFTER_LPM },
+	{ .wmanufacturerid = UFS_VENDOR_WDC,
+	  .model = UFS_ANY_MODEL,
+	  .quirk = UFS_DEVICE_QUIRK_HOST_PA_TACTIVATE },
+	{}
+};
+
+static void ufs_qcom_fixup_dev_quirks(struct ufs_hba *hba)
+{
+	ufshcd_fixup_dev_quirks(hba, ufs_qcom_dev_fixups);
 }
 
 static u32 ufs_qcom_get_ufs_hci_version(struct ufs_hba *hba)
@@ -851,6 +873,10 @@ static void ufs_qcom_advertise_quirks(struct ufs_hba *hba)
 
 	if (host->hw_ver.major > 0x3)
 		hba->quirks |= UFSHCD_QUIRK_REINIT_AFTER_MAX_GEAR_SWITCH;
+
+	if (of_device_is_compatible(hba->dev->of_node, "qcom,sm8550-ufshc") ||
+	    of_device_is_compatible(hba->dev->of_node, "qcom,sm8650-ufshc"))
+		hba->quirks |= UFSHCD_QUIRK_BROKEN_LSDBS_CAP;
 }
 
 static void ufs_qcom_set_phy_gear(struct ufs_qcom_host *host)
@@ -1451,11 +1477,6 @@ int ufs_qcom_testbus_config(struct ufs_qcom_host *host)
 		    (u32)host->testbus.select_minor << offset,
 		    reg);
 	ufs_qcom_enable_test_bus(host);
-	/*
-	 * Make sure the test bus configuration is
-	 * committed before returning.
-	 */
-	mb();
 
 	return 0;
 }
@@ -1547,6 +1568,8 @@ static void ufs_qcom_config_scaling_param(struct ufs_hba *hba,
 	p->timer = DEVFREQ_TIMER_DELAYED;
 	d->upthreshold = 70;
 	d->downdifferential = 5;
+
+	hba->clk_scaling.suspend_on_no_request = true;
 }
 #else
 static void ufs_qcom_config_scaling_param(struct ufs_hba *hba,
@@ -1795,6 +1818,7 @@ static const struct ufs_hba_variant_ops ufs_hba_qcom_vops = {
 	.link_startup_notify    = ufs_qcom_link_startup_notify,
 	.pwr_change_notify	= ufs_qcom_pwr_change_notify,
 	.apply_dev_quirks	= ufs_qcom_apply_dev_quirks,
+	.fixup_dev_quirks       = ufs_qcom_fixup_dev_quirks,
 	.suspend		= ufs_qcom_suspend,
 	.resume			= ufs_qcom_resume,
 	.dbg_register_dump	= ufs_qcom_dump_dbg_regs,
@@ -1837,14 +1861,16 @@ static int ufs_qcom_probe(struct platform_device *pdev)
 static void ufs_qcom_remove(struct platform_device *pdev)
 {
 	struct ufs_hba *hba =  platform_get_drvdata(pdev);
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
 
-	pm_runtime_get_sync(&(pdev)->dev);
-	ufshcd_remove(hba);
-	platform_device_msi_free_irqs_all(hba->dev);
+	ufshcd_pltfrm_remove(pdev);
+	if (host->esi_enabled)
+		platform_device_msi_free_irqs_all(hba->dev);
 }
 
 static const struct of_device_id ufs_qcom_of_match[] __maybe_unused = {
-	{ .compatible = "qcom,ufshc"},
+	{ .compatible = "qcom,ufshc" },
+	{ .compatible = "qcom,sm8550-ufshc" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, ufs_qcom_of_match);
@@ -1872,7 +1898,7 @@ static const struct dev_pm_ops ufs_qcom_pm_ops = {
 
 static struct platform_driver ufs_qcom_pltform = {
 	.probe	= ufs_qcom_probe,
-	.remove_new = ufs_qcom_remove,
+	.remove = ufs_qcom_remove,
 	.driver	= {
 		.name	= "ufshcd-qcom",
 		.pm	= &ufs_qcom_pm_ops,
@@ -1882,4 +1908,5 @@ static struct platform_driver ufs_qcom_pltform = {
 };
 module_platform_driver(ufs_qcom_pltform);
 
+MODULE_DESCRIPTION("Qualcomm UFS host controller driver");
 MODULE_LICENSE("GPL v2");

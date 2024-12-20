@@ -26,6 +26,7 @@
 #include "intel_global_state.h"
 #include "intel_gmbus.h"
 #include "intel_opregion.h"
+#include "intel_dmc_wl.h"
 #include "intel_wm_types.h"
 
 struct task_struct;
@@ -80,10 +81,8 @@ struct intel_display_funcs {
 struct intel_wm_funcs {
 	/* update_wm is for legacy wm management */
 	void (*update_wm)(struct drm_i915_private *dev_priv);
-	int (*compute_pipe_wm)(struct intel_atomic_state *state,
-			       struct intel_crtc *crtc);
-	int (*compute_intermediate_wm)(struct intel_atomic_state *state,
-				       struct intel_crtc *crtc);
+	int (*compute_watermarks)(struct intel_atomic_state *state,
+				  struct intel_crtc *crtc);
 	void (*initial_watermarks)(struct intel_atomic_state *state,
 				   struct intel_crtc *crtc);
 	void (*atomic_update_watermarks)(struct intel_atomic_state *state,
@@ -236,7 +235,7 @@ struct intel_vbt_data {
 	struct sdvo_device_mapping {
 		u8 initialized;
 		u8 dvo_port;
-		u8 slave_addr;
+		u8 target_addr;
 		u8 dvo_wiring;
 		u8 i2c_pin;
 		u8 ddc_pin;
@@ -282,6 +281,12 @@ struct intel_wm {
 };
 
 struct intel_display {
+	/* drm device backpointer */
+	struct drm_device *drm;
+
+	/* Platform (and subplatform, if any) identification */
+	struct intel_display_platforms platform;
+
 	/* Display functions */
 	struct {
 		/* Top level crtc-ish functions */
@@ -345,6 +350,8 @@ struct intel_display {
 		struct intel_global_obj obj;
 
 		unsigned int max_cdclk_freq;
+		unsigned int max_dotclk_freq;
+		unsigned int skl_preferred_vco_freq;
 	} cdclk;
 
 	struct {
@@ -446,6 +453,20 @@ struct intel_display {
 	} ips;
 
 	struct {
+		bool display_irqs_enabled;
+
+		/* For i915gm/i945gm vblank irq workaround */
+		u8 vblank_enabled;
+
+		int vblank_wa_num_pipes;
+
+		struct work_struct vblank_dc_work;
+
+		u32 de_irq_mask[I915_MAX_PIPES];
+		u32 pipestat_irq_mask[I915_MAX_PIPES];
+	} irq;
+
+	struct {
 		wait_queue_head_t waitqueue;
 
 		/* mutex to protect pmdemand programming sequence */
@@ -534,6 +555,7 @@ struct intel_display {
 	struct intel_overlay *overlay;
 	struct intel_display_params params;
 	struct intel_vbt_data vbt;
+	struct intel_dmc_wl wl;
 	struct intel_wm wm;
 };
 

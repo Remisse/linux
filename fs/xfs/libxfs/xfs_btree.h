@@ -154,12 +154,6 @@ struct xfs_btree_ops {
 			       int *stat);
 	int	(*free_block)(struct xfs_btree_cur *cur, struct xfs_buf *bp);
 
-	/* update last record information */
-	void	(*update_lastrec)(struct xfs_btree_cur *cur,
-				  const struct xfs_btree_block *block,
-				  const union xfs_btree_rec *rec,
-				  int ptr, int reason);
-
 	/* records in block/level */
 	int	(*get_minrecs)(struct xfs_btree_cur *cur, int level);
 	int	(*get_maxrecs)(struct xfs_btree_cur *cur, int level);
@@ -222,15 +216,7 @@ struct xfs_btree_ops {
 };
 
 /* btree geometry flags */
-#define XFS_BTGEO_LASTREC_UPDATE	(1U << 0) /* track last rec externally */
-#define XFS_BTGEO_OVERLAPPING		(1U << 1) /* overlapping intervals */
-
-/*
- * Reasons for the update_lastrec method to be called.
- */
-#define LASTREC_UPDATE	0
-#define LASTREC_INSREC	1
-#define LASTREC_DELREC	2
+#define XFS_BTGEO_OVERLAPPING		(1U << 0) /* overlapping intervals */
 
 
 union xfs_btree_irec {
@@ -268,6 +254,7 @@ struct xfs_btree_cur
 	union xfs_btree_irec	bc_rec;	/* current insert/search record value */
 	uint8_t			bc_nlevels; /* number of levels in the tree */
 	uint8_t			bc_maxlevels; /* maximum levels for this btree type */
+	struct xfs_group	*bc_group;
 
 	/* per-type information */
 	union {
@@ -278,13 +265,11 @@ struct xfs_btree_cur
 			struct xbtree_ifakeroot	*ifake;	/* for staging cursor */
 		} bc_ino;
 		struct {
-			struct xfs_perag	*pag;
 			struct xfs_buf		*agbp;
 			struct xbtree_afakeroot	*afake;	/* for staging cursor */
 		} bc_ag;
 		struct {
 			struct xfbtree		*xfbtree;
-			struct xfs_perag	*pag;
 		} bc_mem;
 	};
 
@@ -499,7 +484,7 @@ typedef int (*xfs_btree_visit_blocks_fn)(struct xfs_btree_cur *cur, int level,
 int xfs_btree_visit_blocks(struct xfs_btree_cur *cur,
 		xfs_btree_visit_blocks_fn fn, unsigned int flags, void *data);
 
-int xfs_btree_count_blocks(struct xfs_btree_cur *cur, xfs_extlen_t *blocks);
+int xfs_btree_count_blocks(struct xfs_btree_cur *cur, xfs_filblks_t *blocks);
 
 union xfs_btree_rec *xfs_btree_rec_addr(struct xfs_btree_cur *cur, int n,
 		struct xfs_btree_block *block);

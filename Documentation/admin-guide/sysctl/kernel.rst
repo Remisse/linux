@@ -401,6 +401,15 @@ The upper bound on the number of tasks that are checked.
 This file shows up if ``CONFIG_DETECT_HUNG_TASK`` is enabled.
 
 
+hung_task_detect_count
+======================
+
+Indicates the total number of tasks that have been detected as hung since
+the system boot.
+
+This file shows up if ``CONFIG_DETECT_HUNG_TASK`` is enabled.
+
+
 hung_task_timeout_secs
 ======================
 
@@ -454,7 +463,7 @@ ignore-unaligned-usertrap
 
 On architectures where unaligned accesses cause traps, and where this
 feature is supported (``CONFIG_SYSCTL_ARCH_UNALIGN_NO_WARN``;
-currently, ``arc`` and ``loongarch``), controls whether all
+currently, ``arc``, ``parisc`` and ``loongarch``), controls whether all
 unaligned traps are logged.
 
 = =============================================================

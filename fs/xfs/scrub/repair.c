@@ -21,6 +21,7 @@
 #include "xfs_rmap.h"
 #include "xfs_rmap_btree.h"
 #include "xfs_refcount_btree.h"
+#include "xfs_rtbitmap.h"
 #include "xfs_extent_busy.h"
 #include "xfs_ag.h"
 #include "xfs_ag_resv.h"
@@ -32,6 +33,10 @@
 #include "xfs_reflink.h"
 #include "xfs_health.h"
 #include "xfs_buf_mem.h"
+#include "xfs_da_format.h"
+#include "xfs_da_btree.h"
+#include "xfs_attr.h"
+#include "xfs_dir2.h"
 #include "scrub/scrub.h"
 #include "scrub/common.h"
 #include "scrub/trace.h"
@@ -39,6 +44,7 @@
 #include "scrub/bitmap.h"
 #include "scrub/stats.h"
 #include "scrub/xfile.h"
+#include "scrub/attr_repair.h"
 
 /*
  * Attempt to repair some metadata, if the metadata is corrupt and userspace
@@ -290,7 +296,7 @@ xrep_calc_ag_resblks(
 		icount = pag->pagi_count;
 	} else {
 		/* Try to get the actual counters from disk. */
-		error = xfs_ialloc_read_agi(pag, NULL, &bp);
+		error = xfs_ialloc_read_agi(pag, NULL, 0, &bp);
 		if (!error) {
 			icount = pag->pagi_count;
 			xfs_buf_relse(bp);
@@ -300,7 +306,7 @@ xrep_calc_ag_resblks(
 	/* Now grab the block counters from the AGF. */
 	error = xfs_alloc_read_agf(pag, NULL, 0, &bp);
 	if (error) {
-		aglen = pag->block_count;
+		aglen = pag_group(pag)->xg_block_count;
 		freelen = aglen;
 		usedlen = aglen;
 	} else {
@@ -320,16 +326,14 @@ xrep_calc_ag_resblks(
 
 	/* If the block counts are impossible, make worst-case assumptions. */
 	if (aglen == NULLAGBLOCK ||
-	    aglen != pag->block_count ||
+	    aglen != pag_group(pag)->xg_block_count ||
 	    freelen >= aglen) {
-		aglen = pag->block_count;
+		aglen = pag_group(pag)->xg_block_count;
 		freelen = aglen;
 		usedlen = aglen;
 	}
-	xfs_perag_put(pag);
 
-	trace_xrep_calc_ag_resblks(mp, sm->sm_agno, icount, aglen,
-			freelen, usedlen);
+	trace_xrep_calc_ag_resblks(pag, icount, aglen, freelen, usedlen);
 
 	/*
 	 * Figure out how many blocks we'd need worst case to rebuild
@@ -367,8 +371,9 @@ xrep_calc_ag_resblks(
 		rmapbt_sz = 0;
 	}
 
-	trace_xrep_calc_ag_resblks_btsize(mp, sm->sm_agno, bnobt_sz,
-			inobt_sz, rmapbt_sz, refcbt_sz);
+	trace_xrep_calc_ag_resblks_btsize(pag, bnobt_sz, inobt_sz, rmapbt_sz,
+			refcbt_sz);
+	xfs_perag_put(pag);
 
 	return max(max(bnobt_sz, inobt_sz), max(rmapbt_sz, refcbt_sz));
 }
@@ -409,7 +414,7 @@ xrep_fix_freelist(
 
 	args.mp = sc->mp;
 	args.tp = sc->tp;
-	args.agno = sc->sa.pag->pag_agno;
+	args.agno = pag_agno(sc->sa.pag);
 	args.alignment = 1;
 	args.pag = sc->sa.pag;
 
@@ -478,7 +483,7 @@ xrep_findroot_block(
 	int				block_level;
 	int				error = 0;
 
-	daddr = XFS_AGB_TO_DADDR(mp, ri->sc->sa.pag->pag_agno, agbno);
+	daddr = xfs_agbno_to_daddr(ri->sc->sa.pag, agbno);
 
 	/*
 	 * Blocks in the AGFL have stale contents that might just happen to
@@ -607,7 +612,7 @@ xrep_findroot_block(
 	else
 		fab->root = NULLAGBLOCK;
 
-	trace_xrep_findroot_block(mp, ri->sc->sa.pag->pag_agno, agbno,
+	trace_xrep_findroot_block(ri->sc->sa.pag, agbno,
 			be32_to_cpu(btblock->bb_magic), fab->height - 1);
 out:
 	xfs_trans_brelse(ri->sc->tp, bp);
@@ -724,7 +729,7 @@ xrep_update_qflags(
 	xfs_trans_log_buf(sc->tp, bp, 0, sizeof(struct xfs_dsb) - 1);
 
 no_update:
-	mutex_unlock(&sc->mp->m_quotainfo->qi_quotaofflock);
+	mutex_unlock(&mp->m_quotainfo->qi_quotaofflock);
 }
 
 /* Force a quotacheck the next time we mount. */
@@ -908,7 +913,7 @@ xrep_reinit_pagi(
 	ASSERT(xfs_perag_initialised_agi(pag));
 
 	clear_bit(XFS_AGSTATE_AGI_INIT, &pag->pag_opstate);
-	error = xfs_ialloc_read_agi(pag, sc->tp, &bp);
+	error = xfs_ialloc_read_agi(pag, sc->tp, 0, &bp);
 	if (error)
 		return error;
 
@@ -934,7 +939,7 @@ xrep_ag_init(
 
 	ASSERT(!sa->pag);
 
-	error = xfs_ialloc_read_agi(pag, sc->tp, &sa->agi_bp);
+	error = xfs_ialloc_read_agi(pag, sc->tp, 0, &sa->agi_bp);
 	if (error)
 		return error;
 
@@ -947,6 +952,29 @@ xrep_ag_init(
 	xrep_ag_btcur_init(sc, sa);
 	return 0;
 }
+
+#ifdef CONFIG_XFS_RT
+/*
+ * Given a reference to a rtgroup structure, lock rtgroup btree inodes and
+ * create btree cursors.  Must only be called to repair a regular rt file.
+ */
+int
+xrep_rtgroup_init(
+	struct xfs_scrub	*sc,
+	struct xfs_rtgroup	*rtg,
+	struct xchk_rt		*sr,
+	unsigned int		rtglock_flags)
+{
+	ASSERT(sr->rtg == NULL);
+
+	xfs_rtgroup_lock(rtg, rtglock_flags);
+	sr->rtlock_flags = rtglock_flags;
+
+	/* Grab our own passive reference from the caller's ref. */
+	sr->rtg = xfs_rtgroup_hold(rtg);
+	return 0;
+}
+#endif /* CONFIG_XFS_RT */
 
 /* Reinitialize the per-AG block reservation for the AG we just fixed. */
 int
@@ -963,18 +991,15 @@ xrep_reset_perag_resv(
 	ASSERT(sc->tp);
 
 	sc->flags &= ~XREP_RESET_PERAG_RESV;
-	error = xfs_ag_resv_free(sc->sa.pag);
-	if (error)
-		goto out;
+	xfs_ag_resv_free(sc->sa.pag);
 	error = xfs_ag_resv_init(sc->sa.pag, sc->tp);
 	if (error == -ENOSPC) {
 		xfs_err(sc->mp,
 "Insufficient free space to reset per-AG reservation for AG %u after repair.",
-				sc->sa.pag->pag_agno);
+				pag_agno(sc->sa.pag));
 		error = 0;
 	}
 
-out:
 	return error;
 }
 
@@ -1004,55 +1029,27 @@ xrep_metadata_inode_subtype(
 	struct xfs_scrub	*sc,
 	unsigned int		scrub_type)
 {
-	__u32			smtype = sc->sm->sm_type;
-	__u32			smflags = sc->sm->sm_flags;
-	unsigned int		sick_mask = sc->sick_mask;
+	struct xfs_scrub_subord	*sub;
 	int			error;
 
 	/*
-	 * Let's see if the inode needs repair.  We're going to open-code calls
-	 * to the scrub and repair functions so that we can hang on to the
+	 * Let's see if the inode needs repair.  Use a subordinate scrub context
+	 * to call the scrub and repair functions so that we can hang on to the
 	 * resources that we already acquired instead of using the standard
 	 * setup/teardown routines.
 	 */
-	sc->sm->sm_flags &= ~XFS_SCRUB_FLAGS_OUT;
-	sc->sm->sm_type = scrub_type;
-
-	switch (scrub_type) {
-	case XFS_SCRUB_TYPE_INODE:
-		error = xchk_inode(sc);
-		break;
-	case XFS_SCRUB_TYPE_BMBTD:
-		error = xchk_bmap_data(sc);
-		break;
-	case XFS_SCRUB_TYPE_BMBTA:
-		error = xchk_bmap_attr(sc);
-		break;
-	default:
-		ASSERT(0);
-		error = -EFSCORRUPTED;
-	}
+	sub = xchk_scrub_create_subord(sc, scrub_type);
+	error = sub->sc.ops->scrub(&sub->sc);
 	if (error)
 		goto out;
-
-	if (!xrep_will_attempt(sc))
+	if (!xrep_will_attempt(&sub->sc))
 		goto out;
 
 	/*
 	 * Repair some part of the inode.  This will potentially join the inode
 	 * to the transaction.
 	 */
-	switch (scrub_type) {
-	case XFS_SCRUB_TYPE_INODE:
-		error = xrep_inode(sc);
-		break;
-	case XFS_SCRUB_TYPE_BMBTD:
-		error = xrep_bmap(sc, XFS_DATA_FORK, false);
-		break;
-	case XFS_SCRUB_TYPE_BMBTA:
-		error = xrep_bmap(sc, XFS_ATTR_FORK, false);
-		break;
-	}
+	error = sub->sc.ops->repair(&sub->sc);
 	if (error)
 		goto out;
 
@@ -1061,10 +1058,10 @@ xrep_metadata_inode_subtype(
 	 * that the inode will not be joined to the transaction when we exit
 	 * the function.
 	 */
-	error = xfs_defer_finish(&sc->tp);
+	error = xfs_defer_finish(&sub->sc.tp);
 	if (error)
 		goto out;
-	error = xfs_trans_roll(&sc->tp);
+	error = xfs_trans_roll(&sub->sc.tp);
 	if (error)
 		goto out;
 
@@ -1072,31 +1069,18 @@ xrep_metadata_inode_subtype(
 	 * Clear the corruption flags and re-check the metadata that we just
 	 * repaired.
 	 */
-	sc->sm->sm_flags &= ~XFS_SCRUB_FLAGS_OUT;
-
-	switch (scrub_type) {
-	case XFS_SCRUB_TYPE_INODE:
-		error = xchk_inode(sc);
-		break;
-	case XFS_SCRUB_TYPE_BMBTD:
-		error = xchk_bmap_data(sc);
-		break;
-	case XFS_SCRUB_TYPE_BMBTA:
-		error = xchk_bmap_attr(sc);
-		break;
-	}
+	sub->sc.sm->sm_flags &= ~XFS_SCRUB_FLAGS_OUT;
+	error = sub->sc.ops->scrub(&sub->sc);
 	if (error)
 		goto out;
 
 	/* If corruption persists, the repair has failed. */
-	if (xchk_needs_repair(sc->sm)) {
+	if (xchk_needs_repair(sub->sc.sm)) {
 		error = -EFSCORRUPTED;
 		goto out;
 	}
 out:
-	sc->sick_mask = sick_mask;
-	sc->sm->sm_type = smtype;
-	sc->sm->sm_flags = smflags;
+	xchk_scrub_free_subord(sub);
 	return error;
 }
 
@@ -1122,16 +1106,37 @@ xrep_metadata_inode_forks(
 	if (error)
 		return error;
 
-	/* Make sure the attr fork looks ok before we delete it. */
-	error = xrep_metadata_inode_subtype(sc, XFS_SCRUB_TYPE_BMBTA);
-	if (error)
-		return error;
+	/*
+	 * Metadata files can only have extended attributes on metadir
+	 * filesystems, either for parent pointers or for actual xattr data.
+	 * For a non-metadir filesystem, make sure the attr fork looks ok
+	 * before we delete it.
+	 */
+	if (xfs_inode_hasattr(sc->ip)) {
+		error = xrep_metadata_inode_subtype(sc, XFS_SCRUB_TYPE_BMBTA);
+		if (error)
+			return error;
+	}
 
 	/* Clear the reflink flag since metadata never shares. */
 	if (xfs_is_reflink_inode(sc->ip)) {
 		dirty = true;
 		xfs_trans_ijoin(sc->tp, sc->ip, 0);
 		error = xfs_reflink_clear_inode_flag(sc->ip, &sc->tp);
+		if (error)
+			return error;
+	}
+
+	/*
+	 * Metadata files on non-metadir filesystems cannot have attr forks,
+	 * so clear them now.
+	 */
+	if (xfs_inode_hasattr(sc->ip) && !xfs_has_metadir(sc->mp)) {
+		if (!dirty) {
+			dirty = true;
+			xfs_trans_ijoin(sc->tp, sc->ip, 0);
+		}
+		error = xrep_xattr_reset_fork(sc);
 		if (error)
 			return error;
 	}
@@ -1200,4 +1205,35 @@ xrep_trans_cancel_hook_dummy(
 	xfs_trans_cancel(tp);
 	current->journal_info = *cookiep;
 	*cookiep = NULL;
+}
+
+/*
+ * See if this buffer can pass the given ->verify_struct() function.
+ *
+ * If the buffer already has ops attached and they're not the ones that were
+ * passed in, we reject the buffer.  Otherwise, we perform the structure test
+ * (note that we do not check CRCs) and return the outcome of the test.  The
+ * buffer ops and error state are left unchanged.
+ */
+bool
+xrep_buf_verify_struct(
+	struct xfs_buf			*bp,
+	const struct xfs_buf_ops	*ops)
+{
+	const struct xfs_buf_ops	*old_ops = bp->b_ops;
+	xfs_failaddr_t			fa;
+	int				old_error;
+
+	if (old_ops) {
+		if (old_ops != ops)
+			return false;
+	}
+
+	old_error = bp->b_error;
+	bp->b_ops = ops;
+	fa = bp->b_ops->verify_struct(bp);
+	bp->b_ops = old_ops;
+	bp->b_error = old_error;
+
+	return fa == NULL;
 }
